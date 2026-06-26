@@ -44,9 +44,12 @@
 //!
 //! ## Status
 //!
-//! This is the v0.1 skeleton: the module spine below is laid out but the log /
-//! verification logic lands slice-by-slice (see the project board). No log or
-//! crypto logic is implemented yet.
+//! Slice 1 (#327) is implemented: the **conformance core** — the canonical
+//! Layer-0 leaf encoding ([`leaf`]), the fixed RFC 6962 Merkle hashing
+//! ([`merkle`]), and RFC 6962 / RFC 9162 inclusion + consistency proof
+//! *verification* ([`proof`]) — proven byte-for-byte against the shipped
+//! `mosslet/key-history/v1` known-answer vectors. The tile substrate,
+//! checkpoint/note signing, and CONIKS VRF layers land in later slices.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -58,13 +61,4 @@ pub mod merkle;
 pub mod proof;
 
 pub use error::{Error, Result};
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_builds() {
-        // Trivial smoke test so `cargo test` exercises the crate skeleton.
-        // Real conformance tests arrive in Slice 1 (#327).
-        assert_eq!(2 + 2, 4);
-    }
-}
+pub use proof::{verify_consistency, verify_inclusion};

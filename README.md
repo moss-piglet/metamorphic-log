@@ -10,8 +10,27 @@ for storage and serving, supports externally **witnessed** checkpoints for
 anti-equivocation, layers in **hybrid post-quantum** checkpoint signatures, and
 adds CONIKS-style index privacy via a swappable VRF.
 
-> **Status:** v0.1 skeleton. The module spine is laid out; log and verification
-> logic land slice-by-slice. No log/crypto logic is implemented yet.
+> **Status:** v0.1, building slice-by-slice. The **conformance core** is
+> implemented: canonical Layer-0 leaf encoding, RFC 6962 Merkle hashing, and
+> RFC 6962 / RFC 9162 inclusion + consistency proof verification, proven
+> byte-for-byte against the shipped `mosslet/key-history/v1` known-answer
+> vectors. The tile substrate, witnessed checkpoint signing, and CONIKS VRF
+> layers land in later slices.
+
+## Verifying proofs
+
+```rust
+use metamorphic_log::{verify_inclusion, verify_consistency};
+
+// Prove a leaf is committed at `index` in a tree of `size` whose head is `root`.
+verify_inclusion(index, size, leaf_hash, &audit_path, root)?;
+
+// Prove the tree of `size2`/`root2` is an append-only extension of `size1`/`root1`.
+verify_consistency(size1, size2, &proof, root1, root2)?;
+```
+
+A real `mosslet/key-history/v1` row drops in as a Layer-0 leaf with **zero
+reformatting**; see `metamorphic_log::leaf::key_history_v1`.
 
 ## Single source of truth for primitives
 
