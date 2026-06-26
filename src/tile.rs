@@ -199,6 +199,12 @@ impl Tile {
 /// over).
 #[must_use]
 pub fn partial_width(level: u8, size: u64) -> u16 {
+    // 256^level == 2^(8*level). For level >= 8 the span exceeds any u64 tree
+    // size, so floor(size / span) is 0 and there is no tile at this level.
+    // Short-circuit to avoid overflowing the 256^level computation.
+    if level >= 8 {
+        return 0;
+    }
     let span = 256u128.pow(u32::from(level));
     ((u128::from(size) / span) % 256) as u16
 }
@@ -374,6 +380,13 @@ mod tests {
         assert!(Tile::parse_path("tile/0/000.p/0").is_err()); // partial width 0
         assert!(Tile::parse_path("tile/0/1234/067").is_err()); // missing x prefix
         assert!(Tile::parse_path("checkpoint").is_err());
+    }
+
+    #[test]
+    fn partial_width_does_not_overflow_for_high_levels() {
+        // Levels >= 8 have a span exceeding any u64 size: no tile, no panic.
+        assert_eq!(partial_width(8, u64::MAX), 0);
+        assert_eq!(partial_width(MAX_LEVEL, u64::MAX), 0);
     }
 
     #[test]
