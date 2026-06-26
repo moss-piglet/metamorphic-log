@@ -123,4 +123,12 @@ pub enum Error {
     /// verified, so the note text MUST NOT be trusted.
     #[error("note has no verifiable signature from a trusted key")]
     NoTrustedSignature,
+
+    /// An additive hybrid post-quantum composite signature could not be produced
+    /// or its key material could not be decoded/derived (via the
+    /// metamorphic-crypto composite primitive). A *verification* failure of an
+    /// otherwise well-formed line is reported as [`Error::InvalidSignature`]
+    /// instead, matching the classical path and the C2SP `signed-note` rule.
+    #[error("hybrid composite signature error: {0}")]
+    HybridSignature(String),
 }
