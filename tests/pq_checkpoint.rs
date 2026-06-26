@@ -16,6 +16,8 @@
 //!    cross-type confusion (a hybrid line is ignored by a classical-only
 //!    verifier, never mis-accepted).
 
+#![cfg(not(target_arch = "wasm32"))]
+
 use metamorphic_log::checkpoint::Checkpoint;
 use metamorphic_log::error::Error;
 use metamorphic_log::note::{

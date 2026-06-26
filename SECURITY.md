@@ -7,7 +7,7 @@ If you discover a security vulnerability in this crate, **do not open a public i
 Please report it privately via one of:
 
 - **GitHub Security Advisories**: [Report a vulnerability](https://github.com/moss-piglet/metamorphic-log/security/advisories/new)
-- **Email**: security@metamorphic.app
+- **Email**: security@mosspiglet.dev
 
 We will acknowledge receipt within 48 hours and provide a timeline for a fix.
 
@@ -29,7 +29,7 @@ report primitive-level issues there.
 ## Supported Versions
 
 | Version | Supported |
-|---------|-----------|
+| ------- | --------- |
 | 0.1.x   | Yes       |
 | < 0.1   | No        |
 

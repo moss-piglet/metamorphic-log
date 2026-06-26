@@ -110,5 +110,16 @@ pub mod proof;
 pub mod tile;
 pub mod vrf;
 
+/// Browser **verification + monitor** SDK (`wasm-bindgen`), Slice 6.
+///
+/// A thin personality over the rlib core: every export base64/text-marshals its
+/// arguments and delegates straight to the verification functions in [`proof`],
+/// [`checkpoint`], [`note`], [`coniks`], and [`policy`]. It contains **no**
+/// parallel log or crypto logic, so the bytes it produces and the verifications
+/// it performs are identical to the native crate (proven by the cross-language
+/// byte-parity KAT). Only compiled for `wasm32`.
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
 pub use error::{Error, Result};
 pub use proof::{verify_consistency, verify_inclusion};

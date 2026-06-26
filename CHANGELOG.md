@@ -8,6 +8,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **WASM verification + monitor SDK + cross-language byte-parity KAT (Slice 6).**
+  The browser personality of the engine — a thin `wasm-bindgen` shell over the
+  rlib core that adds **no** log or crypto logic, only base64/text marshalling
+  across the JS boundary. Gated to `wasm32`, so native builds (and the separate
+  sibling Elixir NIF package) never pull in `wasm-bindgen` / `js-sys`:
+  - `wasm` module exports the full verification + monitor surface:
+    `verifyInclusion` / `verifyConsistency` (RFC 6962 core + the monitor's
+    anti-equivocation walk); `keyHistoryV1CanonicalBytes` / `…EntryHash` /
+    `…Rfc6962LeafHash` (the Layer-0 leaf conformance instance); `verifySignedNote`
+    / `checkpointVerify` / `checkpointVerifyInclusion` /
+    `checkpointVerifyConsistency` (classical Ed25519 **and** additive hybrid-PQ
+    checkpoint co-signatures); `coniksVerifyLookup` / `coniksVerifyAbsence` /
+    `verifyCommitment` (CONIKS index privacy); and `signedPolicyVerify` +
+    `policyEnforceCheckpointSigningKey` / `…CheckpointSignature` / `…VrfSuiteId`
+    / `…CommitmentHash` (NamespacePolicy parse/verify + declared == observed).
+    Verification predicates return `true` and **throw** the typed `Error` on any
+    failure; tamper, forgery, and posture mismatch are rejections through every
+    binding.
+  - **Cross-language byte-parity KAT** (`tests/cross_language.rs`, run under
+    `wasm-pack test --node`): the WASM exports reproduce the **same** canonical
+    leaf bytes, `policy_hash`, RFC 6962 leaf hash, checkpoint/note verification,
+    CONIKS proofs, and declared == observed results as the native KAT vectors —
+    byte-for-byte. ML-DSA signing is hedged, so (as in Slices 3/5) the KAT locks
+    *verification* and the deterministic vkey/canonical bytes, never regenerated
+    signature bytes. The proptest-backed native suites and in-`src` unit tests
+    are gated off `wasm32` so the wasm test target builds cleanly.
+  - **Supply-chain release pipeline** (`.github/workflows/release.yml`, #328):
+    on a `v*` tag, runs the quality gates + `cargo audit`, publishes the crate to
+    **crates.io** via OIDC trusted publishing, builds the WASM SDK with
+    `wasm-pack`, generates a CycloneDX **SBOM**, computes SHA-512 checksums,
+    **cosign**-signs the artifacts (keyless OIDC), attaches build-provenance
+    **attestation**, and publishes `@f0rest8/metamorphic-log` to **npm** via OIDC
+    trusted publishing — all third-party actions SHA-pinned, credentials scoped
+    to a protectable `release` environment.
+  - CI gains a `wasm-build` job (`wasm-pack build`) and a `cross-language-kat`
+    job (Node 22 + `wasm-pack test --node`) alongside the existing
+    fmt/clippy/test/wasm32-check/audit/MSRV jobs.
+  - Scope note: the Elixir NIF (`metamorphic_log`, Rustler + dirty schedulers)
+    is deferred to its own sibling Hex package — mirroring the `metamorphic_crypto`
+    precedent of a thin NIF over the **published** crate — and lands after this
+    crate is on crates.io. WASM-first; UniFFI deferred (no native-app consumers
+    yet). Honest framing: this surfaces the existing engine to the browser; it
+    changes no canonical byte format and is not FIPS validated.
 - **Per-namespace policy + declared == observed enforcement (Slice 5).** A
   signed, in-log, versioned `policy::NamespacePolicy` record that declares a
   namespace's selectable post-quantum posture — the only legal flexibility point

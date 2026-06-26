@@ -18,6 +18,8 @@
 //!    tile leaf hashes reproduce the checkpoint root with the same RFC 6962
 //!    hashing as Slice 1.
 
+#![cfg(not(target_arch = "wasm32"))]
+
 use metamorphic_log::checkpoint::Checkpoint;
 use metamorphic_log::merkle::MerkleTree;
 use metamorphic_log::note::{SignedNote, VerifierKey, sign_ed25519};
