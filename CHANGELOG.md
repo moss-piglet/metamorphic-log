@@ -8,6 +8,51 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-namespace policy + declared == observed enforcement (Slice 5).** A
+  signed, in-log, versioned `policy::NamespacePolicy` record that declares a
+  namespace's selectable post-quantum posture — the only legal flexibility point
+  (#324), never touching the audited Layer-1 canonical bytes:
+  - `policy::NamespacePolicy`: a canonical, byte-disciplined Layer-0 leaf
+    (`u32`-be length prefixes, `u64`-be integers, big-endian; mirrors the
+    `leaf` / `coniks` grammar) carrying `namespace`, `policy_schema_version`,
+    `security_level` (`Cat3` / `Cat5`), `checkpoint_suite` (`Hybrid` default /
+    `HybridMatched` / `PureCnsa2`), `commitment_hash` (`Sha3_256` / `Sha3_512`,
+    derived from the level), `vrf_mode` (`Classical` only in v0.1; `HybridOutput`
+    / `PurePqExperimental` scoped per #304), `effective_from`, `created_at`, and
+    a `prev_policy_hash` chain link. Construction validates the v0.1 bundle
+    (commitment-hash derived from level, Classical VRF, `PureCnsa2` ⇒ Cat-5);
+    `policy_hash` is the SHA3-512 content hash over the policy bytes (the chain
+    linkage), distinct from the RFC 6962 leaf hash.
+  - `policy::SignedPolicy`: binds the canonical policy under the namespace root
+    key via the same composite primitive as the Slice-3 hybrid checkpoint line
+    (`metamorphic_crypto::sign` / `verify`) under the
+    `<namespace>/namespace-policy/v1` context, serialized as a Layer-0 leaf.
+  - `policy::PolicyChain`: an ordered policy history enforcing
+    immutability-by-versioning and only-legal-**strengthening** migration
+    (same namespace, `policy_schema_version + 1`, strictly increasing
+    `effective_from`, correct `prev_policy_hash`; a weakening is rejected).
+    `active_at` resolves the version in force at a tree position over half-open
+    `[effective_from_n, effective_from_{n+1})` ranges.
+  - **Declared == observed** (the headline): `enforce_checkpoint_signing_key` /
+    `enforce_checkpoint_signature` map an observed checkpoint hybrid key/signature
+    to `(Suite, SignatureLevel)` via the metamorphic-crypto **0.8.1** typed,
+    opaque `signature_posture` / `signature_posture_from_signature` accessors and
+    compare to the declared posture; `enforce_vrf_suite_id` checks the Slice-4
+    CONIKS `Vrf::suite_id` (#332); `enforce_commitment_hash` checks the
+    commitment parameter; `enforce_observed` checks all three at once. Any
+    mismatch is a hard rejection. This crate re-derives **no** private crypto
+    wire tags — it only consumes the typed accessors.
+  - New `Error` variants: `MalformedPolicy`, `PolicyMigrationRejected`,
+    `PostureMismatch`, `UnknownNamespacePolicy`.
+  - KAT/reference vectors (`tests/namespace_policy.rs`): fixed key material locks
+    the canonical policy bytes, the deterministic verifying key, and the
+    deterministic `policy_hash`; a stored signed policy verifies its own
+    composite signature byte-for-byte (ML-DSA signing is hedged, so
+    **verification** is locked, not the signature bytes); plus declared==observed
+    accept/reject over real per-`(Suite, Level)` keypairs, legal/illegal
+    migration, cross-namespace/version rejection, and `proptest` round-trips.
+    Honest framing: this makes posture *verifiable*, not stronger — not FIPS
+    validated. Depends on `metamorphic-crypto` 0.8.1.
 - **CONIKS-style index privacy (Slice 4).** A swappable VRF plus SHA3-512
   commitments and a per-namespace directory with independently verifiable
   presence/absence proofs — the index-privacy layer:

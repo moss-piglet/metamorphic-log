@@ -44,7 +44,7 @@
 //!
 //! ## Status
 //!
-//! Slices 1–4 are implemented.
+//! Slices 1–5 are implemented.
 //!
 //! **Slice 1 (#327) — conformance core:** the canonical Layer-0 leaf encoding
 //! ([`leaf`]), the fixed RFC 6962 Merkle hashing ([`merkle`]), and RFC 6962 /
@@ -79,6 +79,20 @@
 //! verifiable **presence** and **absence** (index-hiding) proofs over a sparse
 //! SHA3-512 prefix tree. Index privacy is the *only* classical property here;
 //! the commitments and everything below are post-quantum.
+//!
+//! **Slice 5 (#333) — per-namespace policy + declared == observed enforcement
+//! (Layer 0):** [`policy`] adds the signed, in-log, versioned
+//! [`policy::NamespacePolicy`] record that declares a namespace's selectable PQ
+//! posture (checkpoint suite/level, commitment-hash strength, VRF privacy mode)
+//! within the #324 safe menu — never touching the audited Layer-1 canonical
+//! bytes. A [`policy::SignedPolicy`] binds the record under the namespace root
+//! key via the Slice-3 composite primitive; a [`policy::PolicyChain`] enforces
+//! immutability-by-versioning and only-legal-strengthening migration. The
+//! headline is **declared == observed**: a verifier hard-rejects any checkpoint
+//! signature, CONIKS VRF suite, or commitment parameter whose *observed* posture
+//! disagrees with the *declared* one — using the metamorphic-crypto v0.8.1
+//! typed posture accessors, re-deriving no private wire tags. This makes posture
+//! *verifiable*, not stronger.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -91,6 +105,7 @@ pub mod error;
 pub mod leaf;
 pub mod merkle;
 pub mod note;
+pub mod policy;
 pub mod proof;
 pub mod tile;
 pub mod vrf;

@@ -173,4 +173,48 @@ pub enum Error {
         "coniks proof root mismatch: recomputed directory root does not match the expected root"
     )]
     ConiksRootMismatch,
+
+    /// A [`NamespacePolicy`](crate::policy::NamespacePolicy) record was
+    /// structurally malformed: an unknown enum tag, a length-prefixed field that
+    /// overruns the buffer, an invalid namespace, a `prev_policy_hash` that is
+    /// present but not exactly 64 bytes, or a field combination that is illegal
+    /// in this format version (e.g. a `commitment_hash` that does not match the
+    /// one derived from `security_level`, a `vrf_mode` other than `Classical`,
+    /// or `PureCnsa2` at a level below Cat-5).
+    #[error("malformed namespace policy: {0}")]
+    MalformedPolicy(String),
+
+    /// A proposed policy migration was rejected: the new version does not chain
+    /// to the prior one (`prev_policy_hash` / `policy_schema_version` /
+    /// `effective_from` discontinuity), or it would **weaken** the namespace's
+    /// declared posture (e.g. Cat-5 → Cat-3, a commitment-hash downgrade, or a
+    /// VRF-mode downgrade). Migrations are append-only and may only strengthen;
+    /// a weakening is surfaced here rather than silently applied.
+    #[error("policy migration rejected: {0}")]
+    PolicyMigrationRejected(String),
+
+    /// The **declared == observed** check failed: an artifact's *observed* crypto
+    /// posture does not match the *declared* [`NamespacePolicy`] posture. This is
+    /// the headline negative outcome of policy enforcement — a checkpoint
+    /// signature, CONIKS VRF suite, or commitment-hash parameter that disagrees
+    /// with what the active policy version requires is a hard rejection (no
+    /// silent downgrade).
+    ///
+    /// [`NamespacePolicy`]: crate::policy::NamespacePolicy
+    #[error("posture mismatch: declared {declared}, observed {observed}")]
+    PostureMismatch {
+        /// The posture the active policy version declares.
+        declared: String,
+        /// The posture actually observed on the artifact.
+        observed: String,
+    },
+
+    /// No [`NamespacePolicy`](crate::policy::NamespacePolicy) version is in force
+    /// for the requested tree position (or the policy chain is empty), so a
+    /// verifier cannot resolve which posture an entry at that position was
+    /// required to use. An entry can only be enforced against a policy whose
+    /// half-open validity range `[effective_from_n, effective_from_{n+1})`
+    /// contains its position.
+    #[error("no namespace policy in force: {0}")]
+    UnknownNamespacePolicy(String),
 }
