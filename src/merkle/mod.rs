@@ -60,8 +60,8 @@ pub fn empty_root() -> Hash {
 
 /// Compute the RFC 6962 leaf hash: `SHA-256(0x00 || leaf_bytes)`.
 ///
-/// `leaf_bytes` is the opaque, app-defined Layer-0 record (for Mosslet, the
-/// `mosslet/key-history/v1` canonical bytes — see [`crate::leaf`]). The tree
+/// `leaf_bytes` is the opaque, app-defined Layer-0 record (e.g. an
+/// application's canonical record bytes — see [`crate::leaf`]). The tree
 /// treats it as opaque.
 ///
 /// ```

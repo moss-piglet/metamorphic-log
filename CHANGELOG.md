@@ -12,8 +12,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `leaf`: the fixed, length-prefixed canonical-leaf discipline (`u32`-be
     length prefixes, `u64`-be integers, big-endian) with a validated
     `ContextLabel` (`<namespace>/<record-type>/v<N>`) domain separator, the
-    generic intra-chain `content_hash` (SHA3-512-with-context), and the
-    byte-exact `mosslet/key-history/v1` conformance instance.
+    generic intra-chain `content_hash` (SHA3-512-with-context), and a worked
+    `key_history_v1` example record type (the byte-locked conformance instance).
   - `merkle`: RFC 6962 tree hashing over ecosystem SHA-256 (`empty_root`,
     `hash_leaf`, `hash_children`) plus an in-memory reference `MerkleTree` that
     computes roots and generates inclusion/consistency proofs.

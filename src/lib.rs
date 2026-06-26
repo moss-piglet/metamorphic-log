@@ -47,8 +47,12 @@
 //! Slice 1 (#327) is implemented: the **conformance core** — the canonical
 //! Layer-0 leaf encoding ([`leaf`]), the fixed RFC 6962 Merkle hashing
 //! ([`merkle`]), and RFC 6962 / RFC 9162 inclusion + consistency proof
-//! *verification* ([`proof`]) — proven byte-for-byte against the shipped
-//! `mosslet/key-history/v1` known-answer vectors. The tile substrate,
+//! *verification* ([`proof`]). The leaf layer is application-agnostic: any app
+//! defines its own opaque record type under a versioned context label. As a
+//! worked, byte-locked conformance instance, this slice ships
+//! [`leaf::key_history_v1`] — the format used by Mosslet, the first consumer —
+//! and proves the engine reproduces its known-answer vectors byte-for-byte. The
+//! tile substrate,
 //! checkpoint/note signing, and CONIKS VRF layers land in later slices.
 
 #![forbid(unsafe_code)]
