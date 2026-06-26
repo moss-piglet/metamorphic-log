@@ -345,7 +345,7 @@ fn check_no_leading_zero(s: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::merkle::{MerkleTree, hash_leaf};

@@ -163,7 +163,7 @@ pub fn hex_decode(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use proptest::prelude::*;

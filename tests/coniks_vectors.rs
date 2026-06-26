@@ -17,6 +17,8 @@
 //! root, so end-to-end coverage pins the deterministic empty-directory root and
 //! otherwise verifies serialized proofs round-trip and check out.
 
+#![cfg(not(target_arch = "wasm32"))]
+
 use metamorphic_log::commitment::{Opening, commit_with_opening, verify_commitment};
 use metamorphic_log::coniks::{
     AbsenceProof, ConiksDirectory, LookupProof, LookupResult, Namespace, verify_absence,

@@ -17,6 +17,8 @@
 //!    legal/illegal migration, declared==observed accept/reject across real
 //!    per-(Suite,Level) keypairs, and cross-namespace/version rejection.
 
+#![cfg(not(target_arch = "wasm32"))]
+
 use metamorphic_crypto::{
     SIGN_CONTEXT_V1, SignatureLevel, Suite, generate_signing_keypair_suite, sign, signature_posture,
 };

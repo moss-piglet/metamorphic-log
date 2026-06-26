@@ -10,16 +10,36 @@ for storage and serving, supports externally **witnessed** checkpoints for
 anti-equivocation, layers in **hybrid post-quantum** checkpoint signatures, and
 adds CONIKS-style index privacy via a swappable VRF.
 
-> **Status:** v0.1, building slice-by-slice. The **conformance core** is
-> implemented: canonical Layer-0 leaf encoding, RFC 6962 Merkle hashing, and
-> RFC 6962 / RFC 9162 inclusion + consistency proof verification. The leaf layer
-> is application-agnostic — any app defines its own opaque record type under a
-> versioned `<namespace>/<record-type>/v<N>` context label. As a worked,
-> byte-locked example, this slice ships a `key_history_v1` conformance instance
-> (the format used by [Mosslet](https://mosslet.com), the first consumer) and
-> proves the engine reproduces its known-answer vectors byte-for-byte. The tile
-> substrate, witnessed checkpoint signing, and CONIKS VRF layers land in later
-> slices.
+> **Status:** v0.1, building slice-by-slice. Implemented: the **conformance
+> core** (canonical Layer-0 leaf encoding, RFC 6962 Merkle hashing, RFC 6962 /
+> RFC 9162 inclusion + consistency verification), the **C2SP `tlog-tiles`**
+> substrate with `checkpoint` / `signed-note` parsing and classical Ed25519
+> witness verification, **additive hybrid post-quantum** checkpoint signing,
+> **CONIKS** index privacy (swappable VRF + SHA3-512 commitments + lookup/absence
+> proofs), the signed per-namespace **policy** layer with declared == observed
+> enforcement, and the **browser verification + monitor SDK** (WASM). The leaf
+> layer is application-agnostic — any app defines its own opaque record type
+> under a versioned `<namespace>/<record-type>/v<N>` context label; the bundled
+> `key_history_v1` conformance instance (the format used by
+> [Mosslet](https://mosslet.com), the first consumer) is reproduced
+> byte-for-byte by the native crate **and** the WASM SDK. Ingestion/scale
+> primitives land in a later slice.
+
+## Browser verification + monitor SDK (WASM)
+
+The crate ships a `wasm-bindgen` personality (the `wasm` module, `wasm32`-only)
+so a browser can **monitor the log itself** instead of trusting a server. It is
+a thin shell over the rlib core — no parallel logic — published to npm as
+[`@f0rest8/metamorphic-log`](npm-README.md). It exposes the full verification
+surface: `verifyInclusion` / `verifyConsistency`, checkpoint/signed-note
+verification (Ed25519 + hybrid PQ), CONIKS `coniksVerifyLookup` /
+`coniksVerifyAbsence`, and `signedPolicyVerify` + the declared == observed
+`policyEnforce*` checks. A **cross-language byte-parity KAT**
+(`tests/cross_language.rs`, run under `wasm-pack test --node`) proves the WASM
+exports reproduce the native KAT vectors byte-for-byte. The Elixir NIF
+(`metamorphic_log`, Rustler + dirty schedulers) is a deferred follow-up in its
+own sibling Hex package, mirroring the `metamorphic_crypto` precedent of a thin
+NIF over the published crate.
 
 ## Verifying proofs
 
@@ -136,6 +156,10 @@ It does **not** solve:
 | `vrf`        | 3     | Swappable VRF trait; classical ECVRF (RFC 9381 TAI) default |
 | `commitment` | 3     | SHA3-512 hiding/binding index→value commitments             |
 | `coniks`     | 3     | Per-namespace directory; presence + absence (index privacy) |
+| `policy`     | 0     | Signed, versioned namespace policy; declared == observed    |
+| `note`       | 2     | C2SP `signed-note` parse/verify (Ed25519 + hybrid PQ lines) |
+| `tile`       | 2     | C2SP `tlog-tiles` coordinates / serving geometry            |
+| `wasm`       | —     | Browser verification + monitor SDK (`wasm32`-only)          |
 | `error`      | —     | Crate-wide error type                                       |
 
 ## Safety & supply chain
@@ -144,7 +168,11 @@ It does **not** solve:
 - RustCrypto-only dependencies; primitives delegated to `metamorphic-crypto`
 - Edition 2024, MSRV 1.85, dual-licensed `MIT OR Apache-2.0`
 - CI runs `fmt --check`, `clippy -D warnings`, tests, a `wasm32-unknown-unknown`
-  check, `cargo audit`, and an MSRV-floor build; all action refs are SHA-pinned
+  check, a `wasm-pack` SDK build, the cross-language byte-parity KAT
+  (`wasm-pack test --node`), `cargo audit`, and an MSRV-floor build; all action
+  refs are SHA-pinned. The tagged release pipeline adds CycloneDX SBOM, cosign
+  keyless signing, build-provenance attestation, and OIDC trusted publishing to
+  crates.io + npm
 - See [`SECURITY.md`](SECURITY.md) for the disclosure process
 
 ## License

@@ -15,6 +15,10 @@
 //! 3. **Property round-trips** — for trees of many shapes: every leaf's
 //!    generated inclusion proof verifies; consistency between every size pair
 //!    verifies; and tampered proofs / roots / indices are rejected.
+//!
+//! Native-only: gated off wasm32 so `wasm-pack test` (the cross-language KAT
+//! job) builds just `tests/cross_language.rs` and not the proptest-backed suites.
+#![cfg(not(target_arch = "wasm32"))]
 
 use metamorphic_crypto::b64;
 use metamorphic_log::leaf::key_history_v1::Entry;

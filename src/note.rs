@@ -645,7 +645,7 @@ fn is_valid_name(name: &str) -> bool {
     !name.is_empty() && !name.chars().any(|c| c.is_whitespace() || c == '+')
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

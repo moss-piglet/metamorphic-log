@@ -280,7 +280,7 @@ fn subproof(m: u64, leaves: &[Hash], b: bool) -> Vec<Hash> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

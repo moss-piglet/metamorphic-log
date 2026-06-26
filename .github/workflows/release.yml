@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  attestations: write
+  id-token: write
+
+# Prevent two simultaneous tag pushes from racing the publish steps.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Toolchain used to BUILD and PUBLISH the release. Intentionally newer than the
+  # crate's declared MSRV (`rust-version = "1.85"` in Cargo.toml) so the release
+  # tooling (cargo-audit, cargo-cyclonedx, wasm-pack) installs cleanly — those
+  # tools raise their own MSRV over time. MSRV compatibility is still verified in
+  # CI (`ci.yml` msrv job).
+  RUST_TOOLCHAIN: "1.90"
+  WASM_PACK_VERSION: "0.14.0"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Scopes the crates.io and npm OIDC trusted-publishing credentials to a
+    # dedicated, protectable environment (configure under repo Settings →
+    # Environments). The trusted-publisher config on crates.io/npmjs must use
+    # this same environment name.
+    environment: release
+    steps:
+      # Third-party actions are pinned to a full commit SHA (SLSA L3 / federal
+      # supply-chain requirement). Version comments are kept for Dependabot,
+      # which can bump both the SHA and the comment.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # --- Quality gates ---
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+      # Re-check RustSec advisories at release time (CI already runs this on
+      # every push/PR; gating the release too prevents shipping a tag built from
+      # a commit that predates a newly disclosed advisory).
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit dependencies
+        run: cargo audit
+
+      # --- Publish to crates.io ---
+      # Trusted publishing (OIDC): exchanges the workflow's short-lived GitHub
+      # OIDC token for a temporary crates.io token. No long-lived
+      # CARGO_REGISTRY_TOKEN secret is stored anywhere.
+      # One-time setup: crates.io → crate Settings → Trusted Publishing.
+      - name: Authenticate to crates.io (OIDC)
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: crates-auth
+
+      - name: Publish to crates.io
+        # No --no-verify: re-build inside the publish step so crates.io ships
+        # exactly what the tests above ran against.
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+
+      # --- WASM build (browser verification + monitor SDK) ---
+      - name: Install wasm-pack
+        # Build from the locked crates.io source (Cargo.lock verifies each
+        # dependency's checksum) instead of curl|tar of an unverified release
+        # tarball. Slower, but the supply chain is verifiable end to end.
+        run: |
+          cargo install wasm-pack --version "${WASM_PACK_VERSION}" --locked
+          wasm-pack --version
+
+      - name: Build WASM (--target web)
+        run: wasm-pack build --target web --release
+
+      # --- SBOM (CycloneDX) ---
+      # CISA/NIST SSDF/EO 14028 reference CycloneDX. Generated from Cargo.lock so
+      # it reflects the exact dependency tree the artifacts were built from.
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate SBOM
+        run: cargo cyclonedx --format json --override-filename sbom
+
+      - name: Stage SBOM alongside artifacts
+        run: cp sbom.json pkg/sbom.json
+
+      # --- Checksums ---
+      - name: Compute SHA-512 checksums
+        working-directory: pkg
+        run: sha512sum metamorphic_log.js metamorphic_log_bg.wasm sbom.json > SHA512SUMS
+
+      - name: Display checksums
+        run: cat pkg/SHA512SUMS
+
+      # --- Cosign (keyless signing via GitHub OIDC) ---
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign artifacts with cosign
+        run: |
+          cosign sign-blob --yes --bundle pkg/metamorphic_log.js.cosign.bundle pkg/metamorphic_log.js
+          cosign sign-blob --yes --bundle pkg/metamorphic_log_bg.wasm.cosign.bundle pkg/metamorphic_log_bg.wasm
+
+      # --- Attestation ---
+      - name: Attest WASM artifacts
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            pkg/metamorphic_log.js
+            pkg/metamorphic_log_bg.wasm
+            pkg/sbom.json
+
+      # --- npm publish ---
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      # npm trusted publishing (OIDC) requires npm >= 11.5.1; Node 22 ships older.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Scope package for npm
+        working-directory: pkg
+        run: |
+          npm pkg set name="@f0rest8/metamorphic-log"
+          cp ../npm-README.md README.md
+
+      - name: Publish to npm
+        working-directory: pkg
+        # Trusted publishing (OIDC): no NODE_AUTH_TOKEN. npm authenticates via
+        # the workflow's OIDC identity and automatically attaches provenance
+        # (the verified badge on npmjs.com). id-token: write is already granted.
+        # One-time setup: npmjs.com → package Settings → Trusted Publisher.
+        run: npm publish --access public
+
+      # --- GitHub Release ---
+      - name: Attach artifacts to GitHub Release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          files: |
+            pkg/metamorphic_log.js
+            pkg/metamorphic_log_bg.wasm
+            pkg/sbom.json
+            pkg/SHA512SUMS
+            pkg/metamorphic_log.js.cosign.bundle
+            pkg/metamorphic_log_bg.wasm.cosign.bundle
+          fail_on_unmatched_files: true
