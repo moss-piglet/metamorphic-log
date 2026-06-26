@@ -1,6 +1,6 @@
 [package]
 name = "metamorphic-log"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Tamper-evident, append-only transparency log + verification SDK for the Metamorphic platform: RFC 6962/9162 Merkle proofs, C2SP tlog-tiles substrate, witnessed checkpoints, hybrid post-quantum checkpoint signing, and CONIKS-style index privacy. Single source of truth for primitives is metamorphic-crypto."
