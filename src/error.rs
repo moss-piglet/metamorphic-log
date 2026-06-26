@@ -89,4 +89,38 @@ pub enum Error {
     /// would overrun the available bytes, or a context label is invalid).
     #[error("malformed canonical leaf: {0}")]
     MalformedLeaf(String),
+
+    /// A C2SP `tlog-tiles` tile coordinate or tile-path component was invalid
+    /// (e.g. level out of range, partial-tile width out of `1..=255`, or a path
+    /// that does not match `tile/<L>/<N>[.p/<W>]`).
+    #[error("malformed tile: {0}")]
+    MalformedTile(String),
+
+    /// A C2SP `checkpoint` note body was malformed (missing origin/size/root
+    /// lines, a non-decimal or leading-zero size, an empty extension line, or a
+    /// root hash that is not exactly 32 bytes once base64-decoded).
+    #[error("malformed checkpoint: {0}")]
+    MalformedCheckpoint(String),
+
+    /// A C2SP `signed-note` could not be parsed (not valid UTF-8, a forbidden
+    /// ASCII control character, no blank-line/signature separator, or a
+    /// malformed signature line / verifier key).
+    #[error("malformed signed note: {0}")]
+    MalformedNote(String),
+
+    /// A signature line referenced a known key (matching name **and** key id)
+    /// but the signature failed to verify. Per the C2SP `signed-note` spec the
+    /// whole note is rejected in this case.
+    #[error("invalid signature for known key {name:?} (key id {key_id:08x})")]
+    InvalidSignature {
+        /// The key name from the verifier / signature line.
+        name: String,
+        /// The 4-byte key id, as a big-endian `u32`.
+        key_id: u32,
+    },
+
+    /// The note parsed correctly but no signature from any supplied trusted key
+    /// verified, so the note text MUST NOT be trusted.
+    #[error("note has no verifiable signature from a trusted key")]
+    NoTrustedSignature,
 }

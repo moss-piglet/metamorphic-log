@@ -44,25 +44,36 @@
 //!
 //! ## Status
 //!
-//! Slice 1 (#327) is implemented: the **conformance core** — the canonical
-//! Layer-0 leaf encoding ([`leaf`]), the fixed RFC 6962 Merkle hashing
-//! ([`merkle`]), and RFC 6962 / RFC 9162 inclusion + consistency proof
-//! *verification* ([`proof`]). The leaf layer is application-agnostic: any app
-//! defines its own opaque record type under a versioned context label. As a
-//! worked, byte-locked conformance instance, this slice ships
-//! [`leaf::key_history_v1`] — the format used by Mosslet, the first consumer —
-//! and proves the engine reproduces its known-answer vectors byte-for-byte. The
-//! tile substrate,
-//! checkpoint/note signing, and CONIKS VRF layers land in later slices.
+//! Slices 1–2 are implemented.
+//!
+//! **Slice 1 (#327) — conformance core:** the canonical Layer-0 leaf encoding
+//! ([`leaf`]), the fixed RFC 6962 Merkle hashing ([`merkle`]), and RFC 6962 /
+//! RFC 9162 inclusion + consistency proof *verification* ([`proof`]). The leaf
+//! layer is application-agnostic: any app defines its own opaque record type
+//! under a versioned context label. As a worked, byte-locked conformance
+//! instance it ships [`leaf::key_history_v1`] (the format used by Mosslet, the
+//! first consumer).
+//!
+//! **Slice 2 (#329) — C2SP substrate (WRAP):** the [`tile`] module wraps the
+//! `tlog-tiles` substrate (tile coordinates, `tile/<L>/<N>[.p/<W>]` paths, and
+//! recompute-from-tiles consistent with [`merkle`]); [`checkpoint`] parses and
+//! serializes the `tlog-checkpoint` signed-tree-head body and wires it to the
+//! Slice-1 inclusion/consistency verifier; and [`note`] parses/serializes the
+//! `signed-note` format and verifies **classical Ed25519** witness co-signature
+//! lines via [`metamorphic_crypto::ed25519_verify`]. Additive hybrid-PQ
+//! checkpoint signing and the CONIKS VRF layers land in later slices.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod checkpoint;
+mod encoding;
 pub mod error;
 pub mod leaf;
 pub mod merkle;
+pub mod note;
 pub mod proof;
+pub mod tile;
 
 pub use error::{Error, Result};
 pub use proof::{verify_consistency, verify_inclusion};

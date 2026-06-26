@@ -28,7 +28,10 @@ crate-type = ["cdylib", "rlib"]
 # uncomment the `[patch.crates-io]` block at the bottom of this file to point
 # at the sibling working tree (`../metamorphic-crypto`) without changing the
 # version requirement.
-metamorphic-crypto = "0.7"
+# metamorphic-crypto 0.7.2 first exposed the raw RFC 8032 Ed25519 interop API
+# (`ed25519_verify` / `ed25519_sign` / ...) that this crate's `note` module uses
+# to verify classical C2SP witness co-signatures.
+metamorphic-crypto = "0.7.2"
 thiserror = "2"
 
 [dev-dependencies]
