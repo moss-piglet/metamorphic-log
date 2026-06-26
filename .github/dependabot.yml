@@ -1,0 +1,28 @@
+version: 2
+updates:
+  # Keep SHA-pinned GitHub Actions current. Dependabot opens PRs that bump
+  # both the pinned commit SHA and the trailing version comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # Collapse all action bumps into a single weekly PR instead of one per
+      # action. Review the changelogs together, then merge once.
+      github-actions:
+        patterns:
+          - "*"
+
+  # Cargo dependency updates for the crate itself.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # Batch low-risk patch/minor bumps. Major bumps (and 0.x minor bumps,
+      # which are breaking) stay as separate PRs so cryptography-adjacent
+      # dependencies get individual review.
+      cargo-minor:
+        update-types:
+          - "minor"
+          - "patch"
