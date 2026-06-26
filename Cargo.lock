@@ -684,9 +684,9 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "metamorphic-crypto"
-version = "0.7.2"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd2162fc1ecefbe856a621eebce9ae1ca1ff21a148dfc2036629bb87e8c904ef"
+checksum = "6cf3a96b368d9a33b78054af6f44ee0ed1e14d7eb967771df428a32affed6e7e"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -694,6 +694,7 @@ dependencies = [
  "blake2",
  "crypto_box",
  "crypto_secretbox",
+ "curve25519-dalek",
  "ed25519-dalek",
  "ed448-goldilocks",
  "getrandom 0.2.17",
@@ -716,6 +717,7 @@ dependencies = [
 name = "metamorphic-log"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.17",
  "metamorphic-crypto",
  "proptest",
  "thiserror",

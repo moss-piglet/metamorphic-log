@@ -8,6 +8,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **CONIKS-style index privacy (Slice 4).** A swappable VRF plus SHA3-512
+  commitments and a per-namespace directory with independently verifiable
+  presence/absence proofs — the index-privacy layer:
+  - `vrf`: a byte-oriented, object-safe `Vrf` trait (`generate_keypair` /
+    `derive_public_key` / `prove` / `verify` / `proof_to_output`) with a
+    classical `Ecvrf` default — **ECVRF-edwards25519-SHA512-TAI** (RFC 9381
+    ciphersuite `0x03`) via the new `metamorphic_crypto` `vrf` primitive. The
+    constant-time `ELL2` (`0x04`) suite is a designed-in future addition (it
+    lands with a curve backend exposing a conformant hash-to-curve,
+    curve25519-dalek 5.x); because `suite_id` is bound into CONIKS domain
+    separation, adding it never invalidates a `0x03` proof. `hybrid_output`
+    implements the designed-in PQ+classical output combiner
+    (`SHA3-512_with_context(DST, classical || pq)`); the PQ `Vrf` half is not
+    built (no audited lattice VRF exists).
+  - `commitment`: SHA3-512 hiding/binding commitments
+    (`commit` / `commit_with_opening` / `verify_commitment`) under a
+    per-namespace context label — the post-quantum binding half, independent of
+    the classical VRF.
+  - `coniks`: a per-namespace `ConiksDirectory` over a sparse depth-256 SHA3-512
+    prefix tree. `insert` places a value's commitment at its VRF-derived index;
+    `lookup` returns a `LookupResult::Present(LookupProof)` or
+    `Absent(AbsenceProof)`. The free `verify_lookup` / `verify_absence`
+    functions recompute everything from public inputs (namespace, VRF public
+    key, root, identity, proof) with no access to the directory (#316); proofs
+    serialize to canonical bytes and parse back. The namespace is threaded
+    through the VRF input and every tree/commitment hash, so proofs never
+    cross-verify between namespaces.
+  - New `Error` variants: `MalformedNamespace`, `Vrf`, `VrfProofInvalid`,
+    `CommitmentMismatch`, `MalformedConiksProof`, `ConiksRootMismatch`.
+  - KAT/reference vectors (`tests/coniks_vectors.rs`): the VRF trait reproduces
+    RFC 9381 Appendix B.3 Example 16 byte-for-byte; pinned fixed-opening
+    commitment, hybrid-output combiner, and empty-directory root; plus
+    serialize→parse→verify round-trips and `proptest` over random directories
+    (present + absent). Depends on `metamorphic-crypto` 0.8.0.
 - **Additive hybrid post-quantum checkpoint signing (Slice 3).** A second,
   *additive* signature line that gives our own verifiers/monitors post-quantum
   authenticity while the classical Ed25519 line keeps the C2SP witness network

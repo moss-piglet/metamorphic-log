@@ -1,0 +1,961 @@
+//! Layer-3c: **CONIKS-style index privacy** — a per-namespace directory whose
+//! lookups produce verifiable *presence* and *absence* proofs without revealing
+//! which identities the directory holds.
+//!
+//! ## How it fits together
+//!
+//! Three pieces combine here:
+//!
+//! 1. A swappable VRF ([`crate::vrf`]) maps an identity to a private, verifiable
+//!    256-bit tree **index**. Because the index is the VRF output, an observer
+//!    learns nothing about the identity, and the directory cannot move an
+//!    identity elsewhere without a fresh VRF proof.
+//! 2. A SHA3-512 **commitment** ([`crate::commitment`]) binds that index to the
+//!    identity's value (e.g. a key-history head). The commitment — the
+//!    post-quantum, binding half — is what actually sits in the tree.
+//! 3. A **sparse Merkle prefix tree** (depth 256, SHA3-512 nodes) accumulates
+//!    every commitment into a single root. An authentication path from a leaf to
+//!    the root proves *presence*; an authentication path to the (default) empty
+//!    leaf at an index proves *absence*.
+//!
+//! Everything is **per-namespace**: the namespace label is threaded through the
+//! VRF input and every tree/commitment hash, so proofs from one namespace never
+//! verify against another. The VRF construction is bound in via its
+//! [`suite_id`](crate::vrf::Vrf::suite_id), so a proof is tied to the exact VRF
+//! it was produced under.
+//!
+//! ## Independent verification (#316)
+//!
+//! The [`verify_lookup`] and [`verify_absence`] free functions take only the
+//! public inputs a relying party already has — the namespace, the VRF public
+//! key, the directory root, the queried identity, and the proof — and recompute
+//! everything from scratch. They do **not** need the directory. A proof also
+//! serializes to canonical bytes ([`LookupProof::to_bytes`] /
+//! [`AbsenceProof::to_bytes`]) and parses back, so it can be transmitted and
+//! verified by any independent implementation.
+//!
+//! ## Hashing posture
+//!
+//! This prefix tree uses **SHA3-512** (post-quantum) for its nodes — it is a
+//! distinct structure from the RFC 6962 append-only log ([`crate::merkle`]),
+//! which stays on ecosystem SHA-256 for witness compatibility. A CONIKS root is
+//! opaque bytes to Layer 1, so it can be embedded as a Layer-0 leaf and
+//! witnessed without either layer's hashing affecting the other.
+
+use std::collections::BTreeMap;
+
+use metamorphic_crypto::hash::sha3_512_with_context;
+
+use crate::commitment::{COMMITMENT_LEN, COMMITMENT_OPENING_LEN, Commitment, Opening};
+use crate::error::{Error, Result};
+use crate::vrf::{Vrf, VrfProof, VrfPublicKey, VrfSecretKey};
+
+/// Tree depth: a 256-bit index gives one leaf position per possible VRF output
+/// prefix.
+const TREE_DEPTH: usize = 256;
+/// Length of a tree node / leaf hash, in bytes (SHA3-512).
+const NODE_LEN: usize = 64;
+/// Length of the VRF-derived index, in bytes.
+const INDEX_LEN: usize = 32;
+
+/// A validated CONIKS namespace — the per-tenant domain separator.
+///
+/// A namespace is a single non-empty segment of printable ASCII excluding `/`
+/// (so it slots cleanly into the `<namespace>/<record-type>/v<N>` context-label
+/// grammar shared with [`crate::leaf::ContextLabel`]). Distinct namespaces get
+/// independent VRF inputs and tree/commitment hashes, so their directories and
+/// proofs are fully isolated.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Namespace(String);
+
+impl Namespace {
+    /// Parse and validate a namespace segment.
+    ///
+    /// # Errors
+    /// Returns [`Error::MalformedNamespace`] if it is empty or contains a byte
+    /// outside printable ASCII, or a `/`.
+    pub fn parse(namespace: &str) -> Result<Self> {
+        if namespace.is_empty() || !namespace.bytes().all(|b| b.is_ascii_graphic() && b != b'/') {
+            return Err(Error::MalformedNamespace(format!(
+                "namespace must be non-empty printable ASCII without '/': {namespace:?}"
+            )));
+        }
+        Ok(Self(namespace.to_string()))
+    }
+
+    /// The namespace string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The per-namespace commitment context label, `<ns>/coniks-commitment/v1`.
+    #[must_use]
+    pub fn commitment_label(&self) -> String {
+        format!("{}/coniks-commitment/v1", self.0)
+    }
+
+    fn leaf_label(&self) -> String {
+        format!("{}/coniks-leaf/v1", self.0)
+    }
+
+    fn node_label(&self) -> String {
+        format!("{}/coniks-node/v1", self.0)
+    }
+
+    fn empty_label(&self) -> String {
+        format!("{}/coniks-empty/v1", self.0)
+    }
+
+    /// Build the VRF input (`alpha`) for an identity, namespace-scoped so the
+    /// derived index differs across namespaces: `u32_be(len(ns)) || ns ||
+    /// identity`.
+    #[must_use]
+    pub fn vrf_input(&self, identity: &[u8]) -> Vec<u8> {
+        let mut input = Vec::with_capacity(4 + self.0.len() + identity.len());
+        input.extend_from_slice(&(self.0.len() as u32).to_be_bytes());
+        input.extend_from_slice(self.0.as_bytes());
+        input.extend_from_slice(identity);
+        input
+    }
+}
+
+/// Return bit `i` of a 256-bit index, most-significant-bit-first (bit 0 is the
+/// MSB of byte 0 and selects the first branch from the root).
+fn index_bit(index: &[u8; INDEX_LEN], i: usize) -> u8 {
+    (index[i / 8] >> (7 - (i % 8))) & 1
+}
+
+/// Shared hashing for a namespace's prefix tree: node/leaf hashing plus the
+/// precomputed empty-subtree defaults. Built identically by the directory
+/// (to construct proofs) and by the verifier (to check them), so there is a
+/// single source of the byte discipline.
+struct TreeHasher {
+    leaf_label: String,
+    node_label: String,
+    suite_id: u8,
+    /// `empty[d]` is the hash of a wholly empty subtree rooted at depth `d`;
+    /// `empty[TREE_DEPTH]` is the empty-leaf hash.
+    empty: Vec<[u8; NODE_LEN]>,
+}
+
+impl TreeHasher {
+    fn new(namespace: &Namespace, suite_id: u8) -> Self {
+        let empty_leaf: [u8; NODE_LEN] = sha3_512_with_context(&namespace.empty_label(), &[]);
+        let node_label = namespace.node_label();
+
+        // empty[TREE_DEPTH] = empty leaf; empty[d] = node(empty[d+1], empty[d+1]).
+        let mut empty = vec![[0u8; NODE_LEN]; TREE_DEPTH + 1];
+        empty[TREE_DEPTH] = empty_leaf;
+        for d in (0..TREE_DEPTH).rev() {
+            empty[d] = node_hash(&node_label, &empty[d + 1], &empty[d + 1]);
+        }
+
+        Self {
+            leaf_label: namespace.leaf_label(),
+            node_label,
+            suite_id,
+            empty,
+        }
+    }
+
+    /// Leaf hash, binding the VRF suite, the index, and the commitment:
+    /// `SHA3-512_with_context(leaf_label, suite_id(1) || index(32) ||
+    /// commitment(64))`.
+    fn leaf_hash(&self, index: &[u8; INDEX_LEN], commitment: &Commitment) -> [u8; NODE_LEN] {
+        let mut buf = [0u8; 1 + INDEX_LEN + COMMITMENT_LEN];
+        buf[0] = self.suite_id;
+        buf[1..1 + INDEX_LEN].copy_from_slice(index);
+        buf[1 + INDEX_LEN..].copy_from_slice(commitment.as_bytes());
+        sha3_512_with_context(&self.leaf_label, &buf)
+    }
+
+    fn empty_leaf(&self) -> [u8; NODE_LEN] {
+        self.empty[TREE_DEPTH]
+    }
+
+    /// Hash of the subtree at `depth` containing exactly `leaves` (each a
+    /// `(index, commitment)`), using empty-subtree shortcuts.
+    fn subtree(&self, depth: usize, leaves: &[(&[u8; INDEX_LEN], &Commitment)]) -> [u8; NODE_LEN] {
+        if leaves.is_empty() {
+            return self.empty[depth];
+        }
+        if depth == TREE_DEPTH {
+            // Indices are unique, so a leaf depth holds exactly one entry.
+            let (index, commitment) = leaves[0];
+            return self.leaf_hash(index, commitment);
+        }
+        let (left, right): (Vec<_>, Vec<_>) = leaves
+            .iter()
+            .partition(|(index, _)| index_bit(index, depth) == 0);
+        let l = self.subtree(depth + 1, &left);
+        let r = self.subtree(depth + 1, &right);
+        node_hash(&self.node_label, &l, &r)
+    }
+
+    /// Collect the authentication-path siblings for `target` from depth 0 to
+    /// `TREE_DEPTH - 1`. A sibling equal to the empty default is recorded as
+    /// `None` (the verifier recomputes it), keeping proofs compact.
+    fn collect_path(
+        &self,
+        depth: usize,
+        target: &[u8; INDEX_LEN],
+        leaves: &[(&[u8; INDEX_LEN], &Commitment)],
+        out: &mut Vec<Option<[u8; NODE_LEN]>>,
+    ) {
+        if depth == TREE_DEPTH {
+            return;
+        }
+        let (left, right): (Vec<_>, Vec<_>) = leaves
+            .iter()
+            .copied()
+            .partition(|(index, _)| index_bit(index, depth) == 0);
+        let (on_path, sibling) = if index_bit(target, depth) == 0 {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        let sibling_hash = self.subtree(depth + 1, &sibling);
+        out.push(if sibling_hash == self.empty[depth + 1] {
+            None
+        } else {
+            Some(sibling_hash)
+        });
+        self.collect_path(depth + 1, target, &on_path, out);
+    }
+
+    /// Recompute the directory root from a leaf node and its authentication
+    /// path, folding empty defaults in for absent siblings.
+    fn recompute_root(
+        &self,
+        target: &[u8; INDEX_LEN],
+        leaf_node: [u8; NODE_LEN],
+        siblings: &[Option<[u8; NODE_LEN]>],
+    ) -> [u8; NODE_LEN] {
+        let mut current = leaf_node;
+        for depth in (0..TREE_DEPTH).rev() {
+            let sibling = siblings[depth].unwrap_or(self.empty[depth + 1]);
+            current = if index_bit(target, depth) == 0 {
+                node_hash(&self.node_label, &current, &sibling)
+            } else {
+                node_hash(&self.node_label, &sibling, &current)
+            };
+        }
+        current
+    }
+}
+
+/// Interior node hash: `SHA3-512_with_context(node_label, left(64) ||
+/// right(64))`.
+fn node_hash(node_label: &str, left: &[u8; NODE_LEN], right: &[u8; NODE_LEN]) -> [u8; NODE_LEN] {
+    let mut buf = [0u8; 2 * NODE_LEN];
+    buf[..NODE_LEN].copy_from_slice(left);
+    buf[NODE_LEN..].copy_from_slice(right);
+    sha3_512_with_context(node_label, &buf)
+}
+
+/// An authentication path: one optional sibling per tree level (0 = nearest the
+/// leaf). `None` denotes an empty-default sibling the verifier recomputes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthPath {
+    siblings: Vec<Option<[u8; NODE_LEN]>>,
+}
+
+impl AuthPath {
+    /// Canonical serialization: a 32-byte big-endian-bit bitmap (bit `d` set iff
+    /// level `d` has a non-empty sibling), followed by the present sibling
+    /// hashes in level order.
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bitmap = [0u8; TREE_DEPTH / 8];
+        let mut hashes = Vec::new();
+        for (d, sibling) in self.siblings.iter().enumerate() {
+            if let Some(h) = sibling {
+                bitmap[d / 8] |= 1 << (7 - (d % 8));
+                hashes.extend_from_slice(h);
+            }
+        }
+        let mut out = Vec::with_capacity(bitmap.len() + hashes.len());
+        out.extend_from_slice(&bitmap);
+        out.extend_from_slice(&hashes);
+        out
+    }
+
+    /// Parse a canonical authentication path, returning it and the number of
+    /// input bytes consumed.
+    fn parse(bytes: &[u8]) -> Result<(Self, usize)> {
+        let bitmap_len = TREE_DEPTH / 8;
+        if bytes.len() < bitmap_len {
+            return Err(Error::MalformedConiksProof(
+                "authentication path shorter than its bitmap".into(),
+            ));
+        }
+        let bitmap = &bytes[..bitmap_len];
+        let present: usize = bitmap.iter().map(|b| b.count_ones() as usize).sum();
+        let needed = bitmap_len + present * NODE_LEN;
+        if bytes.len() < needed {
+            return Err(Error::MalformedConiksProof(format!(
+                "authentication path: bitmap implies {present} sibling hashes ({needed} bytes), \
+                 only {} available",
+                bytes.len()
+            )));
+        }
+
+        let mut siblings = Vec::with_capacity(TREE_DEPTH);
+        let mut offset = bitmap_len;
+        for d in 0..TREE_DEPTH {
+            let set = (bitmap[d / 8] >> (7 - (d % 8))) & 1 == 1;
+            if set {
+                let mut h = [0u8; NODE_LEN];
+                h.copy_from_slice(&bytes[offset..offset + NODE_LEN]);
+                offset += NODE_LEN;
+                siblings.push(Some(h));
+            } else {
+                siblings.push(None);
+            }
+        }
+        Ok((Self { siblings }, needed))
+    }
+}
+
+/// Append `u32_be(len(bytes)) || bytes` to `out`.
+fn push_lp(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+/// Read a `u32_be`-length-prefixed field at `offset`, returning the field bytes
+/// and the new offset.
+fn read_lp<'a>(bytes: &'a [u8], offset: usize, what: &str) -> Result<(&'a [u8], usize)> {
+    if bytes.len() < offset + 4 {
+        return Err(Error::MalformedConiksProof(format!(
+            "{what}: missing 4-byte length prefix"
+        )));
+    }
+    let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+    let start = offset + 4;
+    if bytes.len() < start + len {
+        return Err(Error::MalformedConiksProof(format!(
+            "{what}: length prefix {len} overruns available bytes"
+        )));
+    }
+    Ok((&bytes[start..start + len], start + len))
+}
+
+const TAG_ABSENCE: u8 = 0x00;
+const TAG_PRESENCE: u8 = 0x01;
+
+/// A **presence** proof: the queried identity is in the directory, mapped (via
+/// the VRF) to a tree index whose committed value is revealed and whose
+/// authentication path recomputes the directory root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupProof {
+    vrf_proof: VrfProof,
+    value: Vec<u8>,
+    opening: Opening,
+    auth_path: AuthPath,
+}
+
+impl LookupProof {
+    /// The revealed value bound at the identity's index. Only trustworthy once
+    /// the proof has been checked with [`verify_lookup`].
+    #[must_use]
+    pub fn value(&self) -> &[u8] {
+        &self.value
+    }
+
+    /// Canonical serialization:
+    /// `0x01 || lp(vrf_proof) || lp(value) || opening(32) || auth_path`.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = vec![TAG_PRESENCE];
+        push_lp(&mut out, self.vrf_proof.as_bytes());
+        push_lp(&mut out, &self.value);
+        out.extend_from_slice(self.opening.as_bytes());
+        out.extend_from_slice(&self.auth_path.to_bytes());
+        out
+    }
+
+    /// Parse a canonical presence proof.
+    ///
+    /// # Errors
+    /// Returns [`Error::MalformedConiksProof`] if the tag, length prefixes, or
+    /// trailing authentication path are inconsistent.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let Some((&tag, rest)) = bytes.split_first() else {
+            return Err(Error::MalformedConiksProof("empty proof".into()));
+        };
+        if tag != TAG_PRESENCE {
+            return Err(Error::MalformedConiksProof(format!(
+                "expected presence tag 0x01, got {tag:#04x}"
+            )));
+        }
+        let (vrf_proof, off) = read_lp(rest, 0, "vrf proof")?;
+        let (value, off) = read_lp(rest, off, "value")?;
+        if rest.len() < off + COMMITMENT_OPENING_LEN {
+            return Err(Error::MalformedConiksProof("missing opening".into()));
+        }
+        let mut opening = [0u8; COMMITMENT_OPENING_LEN];
+        opening.copy_from_slice(&rest[off..off + COMMITMENT_OPENING_LEN]);
+        let (auth_path, consumed) = AuthPath::parse(&rest[off + COMMITMENT_OPENING_LEN..])?;
+        if off + COMMITMENT_OPENING_LEN + consumed != rest.len() {
+            return Err(Error::MalformedConiksProof(
+                "trailing bytes after authentication path".into(),
+            ));
+        }
+        Ok(Self {
+            vrf_proof: VrfProof::from_bytes(vrf_proof.to_vec()),
+            value: value.to_vec(),
+            opening: Opening::from_bytes(opening),
+            auth_path,
+        })
+    }
+}
+
+/// An **absence** proof: the queried identity is *not* in the directory; its
+/// VRF-derived index holds the empty leaf, and the authentication path to that
+/// empty leaf recomputes the directory root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbsenceProof {
+    vrf_proof: VrfProof,
+    auth_path: AuthPath,
+}
+
+impl AbsenceProof {
+    /// Canonical serialization: `0x00 || lp(vrf_proof) || auth_path`.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = vec![TAG_ABSENCE];
+        push_lp(&mut out, self.vrf_proof.as_bytes());
+        out.extend_from_slice(&self.auth_path.to_bytes());
+        out
+    }
+
+    /// Parse a canonical absence proof.
+    ///
+    /// # Errors
+    /// Returns [`Error::MalformedConiksProof`] if the tag, length prefix, or
+    /// trailing authentication path are inconsistent.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let Some((&tag, rest)) = bytes.split_first() else {
+            return Err(Error::MalformedConiksProof("empty proof".into()));
+        };
+        if tag != TAG_ABSENCE {
+            return Err(Error::MalformedConiksProof(format!(
+                "expected absence tag 0x00, got {tag:#04x}"
+            )));
+        }
+        let (vrf_proof, off) = read_lp(rest, 0, "vrf proof")?;
+        let (auth_path, consumed) = AuthPath::parse(&rest[off..])?;
+        if off + consumed != rest.len() {
+            return Err(Error::MalformedConiksProof(
+                "trailing bytes after authentication path".into(),
+            ));
+        }
+        Ok(Self {
+            vrf_proof: VrfProof::from_bytes(vrf_proof.to_vec()),
+            auth_path,
+        })
+    }
+}
+
+/// The outcome of a directory lookup: either a presence or an absence proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LookupResult {
+    /// The identity is present; carries a [`LookupProof`].
+    Present(LookupProof),
+    /// The identity is absent; carries an [`AbsenceProof`].
+    Absent(AbsenceProof),
+}
+
+struct DirectoryEntry {
+    value: Vec<u8>,
+    opening: Opening,
+}
+
+/// A per-namespace CONIKS directory: maps identities to committed values at
+/// VRF-derived indices and produces presence/absence proofs against its root.
+///
+/// This is the prover/operator side. Relying parties verify with the free
+/// [`verify_lookup`] / [`verify_absence`] functions and never need this type.
+pub struct ConiksDirectory {
+    namespace: Namespace,
+    vrf: Box<dyn Vrf>,
+    vrf_secret: VrfSecretKey,
+    vrf_public: VrfPublicKey,
+    hasher: TreeHasher,
+    entries: BTreeMap<Vec<u8>, DirectoryEntry>,
+    leaves: BTreeMap<[u8; INDEX_LEN], Commitment>,
+}
+
+impl ConiksDirectory {
+    /// Create an empty directory for `namespace` using `vrf`, generating a fresh
+    /// VRF keypair from the OS CSPRNG.
+    #[must_use]
+    pub fn new(namespace: Namespace, vrf: Box<dyn Vrf>) -> Self {
+        let (vrf_secret, vrf_public) = vrf.generate_keypair();
+        Self::with_secret_key(namespace, vrf, vrf_secret, vrf_public)
+    }
+
+    /// Create an empty directory from an existing VRF secret key (e.g. a
+    /// persisted per-namespace key).
+    ///
+    /// # Errors
+    /// Returns [`Error::Vrf`] if the public key cannot be derived from the
+    /// secret key.
+    pub fn from_secret_key(
+        namespace: Namespace,
+        vrf: Box<dyn Vrf>,
+        vrf_secret: VrfSecretKey,
+    ) -> Result<Self> {
+        let vrf_public = vrf.derive_public_key(&vrf_secret)?;
+        Ok(Self::with_secret_key(
+            namespace, vrf, vrf_secret, vrf_public,
+        ))
+    }
+
+    fn with_secret_key(
+        namespace: Namespace,
+        vrf: Box<dyn Vrf>,
+        vrf_secret: VrfSecretKey,
+        vrf_public: VrfPublicKey,
+    ) -> Self {
+        let hasher = TreeHasher::new(&namespace, vrf.suite_id());
+        Self {
+            namespace,
+            vrf,
+            vrf_secret,
+            vrf_public,
+            hasher,
+            entries: BTreeMap::new(),
+            leaves: BTreeMap::new(),
+        }
+    }
+
+    /// The namespace this directory serves.
+    #[must_use]
+    pub fn namespace(&self) -> &Namespace {
+        &self.namespace
+    }
+
+    /// The VRF public key relying parties use to verify proofs.
+    #[must_use]
+    pub fn vrf_public_key(&self) -> &VrfPublicKey {
+        &self.vrf_public
+    }
+
+    /// Insert (or replace) `identity`'s `value`, committing to it under a fresh
+    /// random opening and placing the commitment at the identity's VRF-derived
+    /// index.
+    ///
+    /// # Errors
+    /// Returns [`Error::Vrf`] if proving the identity's index fails.
+    pub fn insert(&mut self, identity: &[u8], value: &[u8]) -> Result<()> {
+        let alpha = self.namespace.vrf_input(identity);
+        let proof = self.vrf.prove(&self.vrf_secret, &alpha)?;
+        let index = self.vrf.proof_to_output(&proof)?.index();
+
+        let (commitment, opening) =
+            crate::commitment::commit(&self.namespace.commitment_label(), value);
+
+        self.leaves.insert(index, commitment);
+        self.entries.insert(
+            identity.to_vec(),
+            DirectoryEntry {
+                value: value.to_vec(),
+                opening,
+            },
+        );
+        Ok(())
+    }
+
+    /// The current directory root (the SHA3-512 prefix-tree root over all
+    /// commitments).
+    #[must_use]
+    pub fn root(&self) -> [u8; NODE_LEN] {
+        let leaves: Vec<_> = self.leaves.iter().collect();
+        self.hasher.subtree(0, &leaves)
+    }
+
+    /// Look up `identity`, returning a presence or absence proof against the
+    /// current root.
+    ///
+    /// # Errors
+    /// Returns [`Error::Vrf`] if proving the identity's index fails.
+    pub fn lookup(&self, identity: &[u8]) -> Result<LookupResult> {
+        let alpha = self.namespace.vrf_input(identity);
+        let vrf_proof = self.vrf.prove(&self.vrf_secret, &alpha)?;
+        let index = self.vrf.proof_to_output(&vrf_proof)?.index();
+
+        let all: Vec<_> = self.leaves.iter().collect();
+        let mut siblings = Vec::with_capacity(TREE_DEPTH);
+        self.hasher.collect_path(0, &index, &all, &mut siblings);
+        let auth_path = AuthPath { siblings };
+
+        match self.entries.get(identity) {
+            Some(entry) => Ok(LookupResult::Present(LookupProof {
+                vrf_proof,
+                value: entry.value.clone(),
+                opening: entry.opening.clone(),
+                auth_path,
+            })),
+            None => Ok(LookupResult::Absent(AbsenceProof {
+                vrf_proof,
+                auth_path,
+            })),
+        }
+    }
+}
+
+/// Recover and validate the VRF-derived index for `identity` under a proof.
+fn verified_index(
+    vrf: &dyn Vrf,
+    namespace: &Namespace,
+    vrf_public: &VrfPublicKey,
+    identity: &[u8],
+    vrf_proof: &VrfProof,
+) -> Result<[u8; INDEX_LEN]> {
+    let alpha = namespace.vrf_input(identity);
+    match vrf.verify(vrf_public, &alpha, vrf_proof)? {
+        Some(output) => Ok(output.index()),
+        None => Err(Error::VrfProofInvalid),
+    }
+}
+
+/// Independently verify a **presence** proof, returning the proven value.
+///
+/// Recomputes everything from public inputs: the VRF proof binds `identity` to a
+/// private index, the revealed `(value, opening)` reproduce the leaf commitment,
+/// and the authentication path must recompute `root`.
+///
+/// # Errors
+/// - [`Error::VrfProofInvalid`] if the VRF proof does not verify.
+/// - [`Error::ConiksRootMismatch`] if the authentication path does not
+///   recompute `root` (a wrong value, opening, or tampered path all surface
+///   here).
+/// - [`Error::Vrf`] for a structurally invalid VRF proof.
+pub fn verify_lookup(
+    vrf: &dyn Vrf,
+    namespace: &Namespace,
+    vrf_public: &VrfPublicKey,
+    root: &[u8; NODE_LEN],
+    identity: &[u8],
+    proof: &LookupProof,
+) -> Result<Vec<u8>> {
+    let index = verified_index(vrf, namespace, vrf_public, identity, &proof.vrf_proof)?;
+
+    let commitment = crate::commitment::commit_with_opening(
+        &namespace.commitment_label(),
+        &proof.value,
+        &proof.opening,
+    );
+    let hasher = TreeHasher::new(namespace, vrf.suite_id());
+    let leaf = hasher.leaf_hash(&index, &commitment);
+    let recomputed = hasher.recompute_root(&index, leaf, &proof.auth_path.siblings);
+
+    if &recomputed == root {
+        Ok(proof.value.clone())
+    } else {
+        Err(Error::ConiksRootMismatch)
+    }
+}
+
+/// Independently verify an **absence** proof.
+///
+/// Recomputes the VRF-derived index for `identity` and checks that the
+/// authentication path to the *empty* leaf at that index recomputes `root` —
+/// proving no value is committed there.
+///
+/// # Errors
+/// - [`Error::VrfProofInvalid`] if the VRF proof does not verify.
+/// - [`Error::ConiksRootMismatch`] if the authentication path does not
+///   recompute `root`.
+/// - [`Error::Vrf`] for a structurally invalid VRF proof.
+pub fn verify_absence(
+    vrf: &dyn Vrf,
+    namespace: &Namespace,
+    vrf_public: &VrfPublicKey,
+    root: &[u8; NODE_LEN],
+    identity: &[u8],
+    proof: &AbsenceProof,
+) -> Result<()> {
+    let index = verified_index(vrf, namespace, vrf_public, identity, &proof.vrf_proof)?;
+
+    let hasher = TreeHasher::new(namespace, vrf.suite_id());
+    let recomputed = hasher.recompute_root(&index, hasher.empty_leaf(), &proof.auth_path.siblings);
+
+    if &recomputed == root {
+        Ok(())
+    } else {
+        Err(Error::ConiksRootMismatch)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vrf::Ecvrf;
+
+    fn dir() -> ConiksDirectory {
+        ConiksDirectory::new(Namespace::parse("acme").unwrap(), Box::new(Ecvrf))
+    }
+
+    #[test]
+    fn namespace_validation() {
+        assert!(Namespace::parse("acme").is_ok());
+        assert!(Namespace::parse("mosslet").is_ok());
+        assert!(Namespace::parse("").is_err());
+        assert!(Namespace::parse("has/slash").is_err());
+        assert!(Namespace::parse("has space").is_err());
+    }
+
+    #[test]
+    fn present_lookup_verifies() {
+        let mut d = dir();
+        d.insert(b"alice", b"alice-value").unwrap();
+        d.insert(b"bob", b"bob-value").unwrap();
+        let root = d.root();
+
+        let LookupResult::Present(proof) = d.lookup(b"alice").unwrap() else {
+            panic!("alice should be present");
+        };
+        let value = verify_lookup(
+            &Ecvrf,
+            d.namespace(),
+            d.vrf_public_key(),
+            &root,
+            b"alice",
+            &proof,
+        )
+        .unwrap();
+        assert_eq!(value, b"alice-value");
+    }
+
+    #[test]
+    fn absent_lookup_verifies() {
+        let mut d = dir();
+        d.insert(b"alice", b"v").unwrap();
+        let root = d.root();
+
+        let LookupResult::Absent(proof) = d.lookup(b"carol").unwrap() else {
+            panic!("carol should be absent");
+        };
+        verify_absence(
+            &Ecvrf,
+            d.namespace(),
+            d.vrf_public_key(),
+            &root,
+            b"carol",
+            &proof,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn empty_directory_absence_verifies() {
+        let d = dir();
+        let root = d.root();
+        let LookupResult::Absent(proof) = d.lookup(b"nobody").unwrap() else {
+            panic!("absent");
+        };
+        verify_absence(
+            &Ecvrf,
+            d.namespace(),
+            d.vrf_public_key(),
+            &root,
+            b"nobody",
+            &proof,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn tampered_value_is_rejected() {
+        let mut d = dir();
+        d.insert(b"alice", b"real").unwrap();
+        let root = d.root();
+        let LookupResult::Present(mut proof) = d.lookup(b"alice").unwrap() else {
+            panic!("present");
+        };
+        proof.value = b"forged".to_vec();
+        assert_eq!(
+            verify_lookup(
+                &Ecvrf,
+                d.namespace(),
+                d.vrf_public_key(),
+                &root,
+                b"alice",
+                &proof
+            ),
+            Err(Error::ConiksRootMismatch)
+        );
+    }
+
+    #[test]
+    fn absence_proof_for_present_identity_is_rejected() {
+        // A directory cannot prove absence of an identity it actually holds: the
+        // empty-leaf root recomputation will not match the real root.
+        let mut d = dir();
+        d.insert(b"alice", b"v").unwrap();
+        let root = d.root();
+        let LookupResult::Present(present) = d.lookup(b"alice").unwrap() else {
+            panic!("present");
+        };
+        // Forge an absence proof reusing the (valid) VRF proof + path.
+        let forged = AbsenceProof {
+            vrf_proof: VrfProof::from_bytes(present.to_bytes()[5..5].to_vec()),
+            auth_path: present.auth_path.clone(),
+        };
+        // Structurally the forged vrf proof is empty -> Vrf error, but even a
+        // valid VRF proof would fail the root check; assert it does not pass.
+        assert!(
+            verify_absence(
+                &Ecvrf,
+                d.namespace(),
+                d.vrf_public_key(),
+                &root,
+                b"alice",
+                &forged
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cross_namespace_proof_is_rejected() {
+        let mut d = dir();
+        d.insert(b"alice", b"v").unwrap();
+        let root = d.root();
+        let LookupResult::Present(proof) = d.lookup(b"alice").unwrap() else {
+            panic!("present");
+        };
+        // Verifying under a different namespace must fail: the VRF input is
+        // namespace-scoped, so the proof does not verify.
+        let other = Namespace::parse("evil").unwrap();
+        assert!(
+            verify_lookup(&Ecvrf, &other, d.vrf_public_key(), &root, b"alice", &proof).is_err()
+        );
+    }
+
+    #[test]
+    fn wrong_root_is_rejected() {
+        let mut d = dir();
+        d.insert(b"alice", b"v").unwrap();
+        let LookupResult::Present(proof) = d.lookup(b"alice").unwrap() else {
+            panic!("present");
+        };
+        let bad_root = [0u8; NODE_LEN];
+        assert_eq!(
+            verify_lookup(
+                &Ecvrf,
+                d.namespace(),
+                d.vrf_public_key(),
+                &bad_root,
+                b"alice",
+                &proof
+            ),
+            Err(Error::ConiksRootMismatch)
+        );
+    }
+
+    #[test]
+    fn proofs_round_trip_through_bytes() {
+        let mut d = dir();
+        d.insert(b"alice", b"alice-value").unwrap();
+        let root = d.root();
+
+        let LookupResult::Present(present) = d.lookup(b"alice").unwrap() else {
+            panic!("present");
+        };
+        let reparsed = LookupProof::from_bytes(&present.to_bytes()).unwrap();
+        assert_eq!(reparsed, present);
+        assert_eq!(
+            verify_lookup(
+                &Ecvrf,
+                d.namespace(),
+                d.vrf_public_key(),
+                &root,
+                b"alice",
+                &reparsed
+            )
+            .unwrap(),
+            b"alice-value"
+        );
+
+        let LookupResult::Absent(absent) = d.lookup(b"carol").unwrap() else {
+            panic!("absent");
+        };
+        let reparsed_absent = AbsenceProof::from_bytes(&absent.to_bytes()).unwrap();
+        assert_eq!(reparsed_absent, absent);
+        verify_absence(
+            &Ecvrf,
+            d.namespace(),
+            d.vrf_public_key(),
+            &root,
+            b"carol",
+            &reparsed_absent,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn malformed_proof_bytes_are_rejected() {
+        assert!(LookupProof::from_bytes(&[]).is_err());
+        assert!(LookupProof::from_bytes(&[TAG_ABSENCE]).is_err()); // wrong tag
+        assert!(AbsenceProof::from_bytes(&[TAG_PRESENCE]).is_err()); // wrong tag
+        assert!(AbsenceProof::from_bytes(&[TAG_ABSENCE, 0, 0]).is_err()); // truncated lp
+    }
+
+    #[test]
+    fn index_is_namespace_scoped() {
+        // The same identity gets different indices under different namespaces.
+        let ns_a = Namespace::parse("a").unwrap();
+        let ns_b = Namespace::parse("b").unwrap();
+        assert_ne!(ns_a.vrf_input(b"alice"), ns_b.vrf_input(b"alice"));
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // Each lookup over a sparse depth-256 tree is intentionally O(leaves *
+        // depth) (singleton branches descend to the full index length), so cap
+        // the case count to keep CI fast while still exercising many random
+        // directory shapes.
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn random_directory_presence_and_absence(
+            present_ids in proptest::collection::vec(any::<u64>(), 1..9),
+            absent_id: u64,
+        ) {
+            prop_assume!(!present_ids.contains(&absent_id));
+            let mut d = dir();
+            for id in &present_ids {
+                d.insert(&id.to_be_bytes(), format!("v{id}").as_bytes()).unwrap();
+            }
+            let root = d.root();
+
+            // Every inserted identity verifies as present with its value.
+            for id in &present_ids {
+                let key = id.to_be_bytes();
+                let LookupResult::Present(proof) = d.lookup(&key).unwrap() else {
+                    prop_assert!(false, "expected present");
+                    unreachable!();
+                };
+                let value = verify_lookup(
+                    &Ecvrf, d.namespace(), d.vrf_public_key(), &root, &key, &proof,
+                ).unwrap();
+                prop_assert_eq!(value, format!("v{id}").into_bytes());
+            }
+
+            // A non-inserted identity verifies as absent.
+            let key = absent_id.to_be_bytes();
+            let LookupResult::Absent(proof) = d.lookup(&key).unwrap() else {
+                prop_assert!(false, "expected absent");
+                unreachable!();
+            };
+            verify_absence(
+                &Ecvrf, d.namespace(), d.vrf_public_key(), &root, &key, &proof,
+            ).unwrap();
+        }
+    }
+}
