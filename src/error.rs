@@ -1,6 +1,6 @@
 //! Error types for the transparency-log engine.
 //!
-//! This module defines the crate-wide [`Error`] enum and [`Result`] alias. Like
+//! This module defines the crate-wide [`Error`](enum@Error) enum and [`Result`] alias. Like
 //! the rest of the v0.1 skeleton it is intentionally minimal: variants are added
 //! slice-by-slice as the verification core, tile substrate, checkpoint signing,
 //! and CONIKS layers land.
