@@ -131,4 +131,46 @@ pub enum Error {
     /// instead, matching the classical path and the C2SP `signed-note` rule.
     #[error("hybrid composite signature error: {0}")]
     HybridSignature(String),
+
+    /// A CONIKS namespace label was malformed (empty, or containing a byte
+    /// outside the printable-ASCII-excluding-`/` set). The namespace is the
+    /// per-tenant domain separator threaded through every VRF, commitment, and
+    /// prefix-tree hash, so it must be unambiguous.
+    #[error("malformed namespace: {0}")]
+    MalformedNamespace(String),
+
+    /// A VRF operation failed structurally (e.g. a key/proof of the wrong byte
+    /// length, or a proof component that is not a valid curve point). A VRF
+    /// proof that is well-formed but does not verify against `(public_key,
+    /// alpha)` is reported as [`Error::VrfProofInvalid`], not this variant.
+    #[error("vrf error: {0}")]
+    Vrf(String),
+
+    /// A VRF proof was well-formed but did not verify: the claimed
+    /// identity→index binding is not authentic under the namespace's VRF public
+    /// key. CONIKS lookup/absence proofs are rejected in this case, because the
+    /// private index they rely on is unproven.
+    #[error("vrf proof did not verify against the namespace public key")]
+    VrfProofInvalid,
+
+    /// A commitment failed to open: the supplied `(value, opening)` does not
+    /// reproduce the committed digest. The commitment binds an index to a value
+    /// (SHA3-512, post-quantum), so a mismatch means the proof does not bind the
+    /// claimed value.
+    #[error("commitment did not open to the claimed value")]
+    CommitmentMismatch,
+
+    /// A CONIKS lookup or absence proof was structurally malformed (e.g. an
+    /// authentication-path component of the wrong length, or a sibling bitmap
+    /// inconsistent with the supplied sibling hashes).
+    #[error("malformed coniks proof: {0}")]
+    MalformedConiksProof(String),
+
+    /// A CONIKS lookup or absence proof was well-formed but did not verify: the
+    /// authentication path did not recompute the expected directory root. This
+    /// is the headline negative outcome of CONIKS proof verification.
+    #[error(
+        "coniks proof root mismatch: recomputed directory root does not match the expected root"
+    )]
+    ConiksRootMismatch,
 }

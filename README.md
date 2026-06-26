@@ -42,6 +42,35 @@ versioned context label (`"acme/user-keys/v1"`, `"example-app/audit-event/v2"`,
 `metamorphic_log::leaf::key_history_v1` module is a worked example of such a
 record type (and the byte-locked conformance fixture); model your own on it.
 
+## Index privacy (CONIKS)
+
+A `coniks::ConiksDirectory` maps identities to committed values at
+VRF-derived, privacy-preserving tree positions, and answers lookups with
+**presence** or **absence** proofs that a relying party verifies independently —
+from only the namespace, the VRF public key, the directory root, and the proof.
+
+```rust
+use metamorphic_log::coniks::{ConiksDirectory, LookupResult, Namespace, verify_lookup};
+use metamorphic_log::vrf::Ecvrf;
+
+let mut dir = ConiksDirectory::new(Namespace::parse("acme")?, Box::new(Ecvrf));
+dir.insert(b"alice@example.com", b"key-history-head")?;
+let root = dir.root();
+
+let LookupResult::Present(proof) = dir.lookup(b"alice@example.com")? else {
+    unreachable!()
+};
+// Independent verification — no access to the directory needed.
+let value = verify_lookup(
+    &Ecvrf, dir.namespace(), dir.vrf_public_key(), &root, b"alice@example.com", &proof,
+)?;
+assert_eq!(value, b"key-history-head");
+```
+
+The VRF is swappable behind the `vrf::Vrf` trait (classical ECVRF today; a
+hybrid PQ construction slots in later with no format change). Commitments
+(`commitment`) are SHA3-512 — post-quantum and binding regardless of the VRF.
+
 ## Single source of truth for primitives
 
 This crate contains **no cryptographic primitives of its own**. Every hash
@@ -76,9 +105,12 @@ It does **not** solve:
   commitments. Checkpoints are designed for hybrid post-quantum signing via
   `metamorphic-crypto`'s composite (ML-DSA + classical) signatures.
 - **Index-privacy** (the CONIKS VRF) defaults to a classical
-  ECVRF-edwards25519 construction (RFC 9381), behind a swappable trait with a
-  hybrid-output path designed in. This is the _only_ layer with a classical
-  default in v0.1.
+  ECVRF-edwards25519-SHA512-TAI construction (RFC 9381 ciphersuite `0x03`),
+  behind a swappable trait. The constant-time `ELL2` (`0x04`) suite and a
+  hybrid (PQ + classical) output path are designed in but not built — the
+  former lands with a curve backend that exposes a conformant hash-to-curve, the
+  latter when an audited lattice VRF exists. This is the _only_ layer with a
+  classical default in v0.1.
 - Primitives are hybrid post-quantum, pure-Rust, and NCC-audited (via
   `metamorphic-crypto`). They are **not** FIPS-validated, and this project does
   not claim FIPS validation.
@@ -101,6 +133,9 @@ It does **not** solve:
 | `merkle`     | 1     | RFC 6962 SHA-256 tree-node hashing (fixed, witness-audited) |
 | `proof`      | 1     | Inclusion + consistency proof verification                  |
 | `checkpoint` | 2     | Signed-note / witnessed checkpoints; hybrid PQ signing      |
+| `vrf`        | 3     | Swappable VRF trait; classical ECVRF (RFC 9381 TAI) default |
+| `commitment` | 3     | SHA3-512 hiding/binding index→value commitments             |
+| `coniks`     | 3     | Per-namespace directory; presence + absence (index privacy) |
 | `error`      | —     | Crate-wide error type                                       |
 
 ## Safety & supply chain

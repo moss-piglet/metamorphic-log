@@ -44,7 +44,7 @@
 //!
 //! ## Status
 //!
-//! Slices 1–3 are implemented.
+//! Slices 1–4 are implemented.
 //!
 //! **Slice 1 (#327) — conformance core:** the canonical Layer-0 leaf encoding
 //! ([`leaf`]), the fixed RFC 6962 Merkle hashing ([`merkle`]), and RFC 6962 /
@@ -70,11 +70,22 @@
 //! checkpoint can be co-signed by both a witness-compatible Ed25519 key and our
 //! forward-secure PQ key; a verifier accepts any mix of trusted key types. The
 //! CONIKS VRF layer lands in Slice 4.
+//!
+//! **Slice 4 (#332) — CONIKS index privacy (Layer 3):** a swappable VRF
+//! ([`vrf`]) with a classical ECVRF-edwards25519-SHA512-TAI default (RFC 9381,
+//! via [`metamorphic_crypto`]) and a designed-in — not yet built — hybrid/PQ
+//! path; SHA3-512 hash-based [`commitment`]s binding an index to a value; and a
+//! per-namespace [`coniks`] directory whose lookups yield independently
+//! verifiable **presence** and **absence** (index-hiding) proofs over a sparse
+//! SHA3-512 prefix tree. Index privacy is the *only* classical property here;
+//! the commitments and everything below are post-quantum.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod checkpoint;
+pub mod commitment;
+pub mod coniks;
 mod encoding;
 pub mod error;
 pub mod leaf;
@@ -82,6 +93,7 @@ pub mod merkle;
 pub mod note;
 pub mod proof;
 pub mod tile;
+pub mod vrf;
 
 pub use error::{Error, Result};
 pub use proof::{verify_consistency, verify_inclusion};
