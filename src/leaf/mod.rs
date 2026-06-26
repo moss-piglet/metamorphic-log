@@ -8,10 +8,12 @@
 //! This module provides:
 //!
 //! 1. [`ContextLabel`] — the versioned `<namespace>/<record-type>/v<N>` domain
-//!    separator used by the intra-chain content hash. The label lives *inside*
-//!    the content hash (it never touches Layer 1's tile mechanics), giving
-//!    cross-protocol / cross-context separation while keeping the Merkle layer
-//!    label-agnostic (#299 / #290).
+//!    separator used by the intra-chain content hash. Each application chooses
+//!    its own namespace and record types (e.g. `"acme/user-keys/v1"`,
+//!    `"example-app/audit-event/v2"`). The label lives *inside* the content
+//!    hash (it never touches Layer 1's tile mechanics), giving cross-protocol /
+//!    cross-context separation while keeping the Merkle layer label-agnostic
+//!    (#299 / #290).
 //!
 //! 2. [`content_hash`] — the generic intra-chain leaf-content hash,
 //!    `sha3_512_with_context(label, content)` from
@@ -20,11 +22,13 @@
 //!    RFC 6962 Merkle leaf hash ([`crate::merkle::hash_leaf`]). The same leaf
 //!    bytes feed both linkages without reformatting either.
 //!
-//! 3. The [`key_history_v1`] conformance instance — the byte-exact
-//!    `mosslet/key-history/v1` canonical leaf format shipped in Mosslet
-//!    (`assets/js/crypto/key_history.js`, locked by
-//!    `test/mosslet/crypto/key_history_test.exs`). This is the first real-world
-//!    leaf shape and the seed of the cross-language KAT suite (#315 / #299).
+//! 3. [`key_history_v1`] — a worked, byte-exact **example/conformance instance**
+//!    of an application record type. It is not privileged by the engine; it is
+//!    simply the first real-world consumer's leaf shape (Mosslet's signed
+//!    key-history, `assets/js/crypto/key_history.js`, locked by
+//!    `test/mosslet/crypto/key_history_test.exs`) and the seed of the
+//!    cross-language KAT suite (#315 / #299). Any other application defines its
+//!    own record type the same way, against this same fixed byte discipline.
 //!
 //! ## Byte-layout discipline (fixed, audited — version-bump-or-nothing)
 //!
@@ -42,7 +46,8 @@ use crate::error::{Error, Result};
 /// A validated, versioned context label of the form
 /// `<namespace>/<record-type>/v<N>`.
 ///
-/// Used as the SHA3-512 domain separator for [`content_hash`]. The grammar is
+/// Used as the SHA3-512 domain separator for [`content_hash`]. Each consuming
+/// application picks its own namespace and record-type segments; the grammar is
 /// deliberately small and strict so labels are unambiguous across tenants and
 /// versions:
 ///
@@ -54,10 +59,11 @@ use crate::error::{Error, Result};
 /// ```
 /// use metamorphic_log::leaf::ContextLabel;
 ///
-/// let label = ContextLabel::parse("mosslet/key-history/v1").unwrap();
-/// assert_eq!(label.as_str(), "mosslet/key-history/v1");
-/// assert_eq!(label.namespace(), "mosslet");
-/// assert_eq!(label.record_type(), "key-history");
+/// // Any application defines its own namespace/record-type/version.
+/// let label = ContextLabel::parse("acme/user-keys/v1").unwrap();
+/// assert_eq!(label.as_str(), "acme/user-keys/v1");
+/// assert_eq!(label.namespace(), "acme");
+/// assert_eq!(label.record_type(), "user-keys");
 /// assert_eq!(label.version(), 1);
 ///
 /// assert!(ContextLabel::parse("missing/version").is_err());
@@ -122,19 +128,19 @@ impl ContextLabel {
         })
     }
 
-    /// The full label string, e.g. `"mosslet/key-history/v1"`.
+    /// The full label string, e.g. `"acme/user-keys/v1"`.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.label
     }
 
-    /// The namespace segment, e.g. `"mosslet"`.
+    /// The namespace segment, e.g. `"acme"`.
     #[must_use]
     pub fn namespace(&self) -> &str {
         &self.label[..self.namespace_len]
     }
 
-    /// The record-type segment, e.g. `"key-history"`.
+    /// The record-type segment, e.g. `"user-keys"`.
     #[must_use]
     pub fn record_type(&self) -> &str {
         let start = self.namespace_len + 1;
@@ -151,11 +157,11 @@ impl ContextLabel {
 /// Generic intra-chain leaf-content hash:
 /// `sha3_512_with_context(label, content)` (64 bytes).
 ///
-/// This is the per-identity continuity linkage (e.g. `#315`'s `entry_hash` that
-/// the next entry chains to via `prev_entry_hash`). It is computed over the
-/// leaf *content* a given record type chooses to commit; the
-/// [`key_history_v1`] instance, matching the shipped Mosslet format, commits the
-/// **base64 of the canonical bytes** (see that module).
+/// This is the per-identity continuity linkage (for example, a key-history
+/// chain's `entry_hash` that the next entry chains to via a `prev_entry_hash`
+/// field). It is computed over whatever leaf *content* a given record type
+/// commits — for an opaque Layer-0 record that is simply the canonical bytes
+/// (the [`key_history_v1`] example hashes its canonical bytes directly).
 ///
 /// This hash is deliberately distinct from the RFC 6962 Merkle leaf hash
 /// ([`crate::merkle::hash_leaf`]): one provides per-identity continuity
@@ -175,14 +181,17 @@ fn push_lp(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-/// The `mosslet/key-history/v1` conformance instance.
+/// Example record type: the `mosslet/key-history/v1` conformance instance.
 ///
-/// This is the first real-world Layer-0 leaf shape and the seed of the
-/// cross-language KAT suite. The byte layout, the SHA3-512 `entry_hash`
-/// framing, and the RFC 6962 leaf hash here are byte-for-byte identical to the
-/// shipped Mosslet implementation (`assets/js/crypto/key_history.js`, locked by
+/// This module is an **example** of how an application defines a Layer-0 record
+/// type; the engine does not privilege it. It happens to be the first
+/// real-world leaf shape (and the seed of the cross-language KAT suite), so it
+/// doubles as a conformance fixture: the byte layout, the SHA3-512 `entry_hash`,
+/// and the RFC 6962 leaf hash here are byte-for-byte identical to the shipped
+/// reference implementation (`assets/js/crypto/key_history.js`, locked by
 /// `test/mosslet/crypto/key_history_test.exs`). A real key-history row is a
-/// valid leaf with **zero reformatting**.
+/// valid leaf with **zero reformatting**. Other applications define their own
+/// record types against the same fixed byte discipline.
 pub mod key_history_v1 {
     use super::{ContextLabel, Error, Result, content_hash, push_lp};
     use crate::merkle::{Hash, hash_leaf};

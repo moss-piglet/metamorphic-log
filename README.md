@@ -12,10 +12,14 @@ adds CONIKS-style index privacy via a swappable VRF.
 
 > **Status:** v0.1, building slice-by-slice. The **conformance core** is
 > implemented: canonical Layer-0 leaf encoding, RFC 6962 Merkle hashing, and
-> RFC 6962 / RFC 9162 inclusion + consistency proof verification, proven
-> byte-for-byte against the shipped `mosslet/key-history/v1` known-answer
-> vectors. The tile substrate, witnessed checkpoint signing, and CONIKS VRF
-> layers land in later slices.
+> RFC 6962 / RFC 9162 inclusion + consistency proof verification. The leaf layer
+> is application-agnostic — any app defines its own opaque record type under a
+> versioned `<namespace>/<record-type>/v<N>` context label. As a worked,
+> byte-locked example, this slice ships a `key_history_v1` conformance instance
+> (the format used by [Mosslet](https://mosslet.com), the first consumer) and
+> proves the engine reproduces its known-answer vectors byte-for-byte. The tile
+> substrate, witnessed checkpoint signing, and CONIKS VRF layers land in later
+> slices.
 
 ## Verifying proofs
 
@@ -29,8 +33,14 @@ verify_inclusion(index, size, leaf_hash, &audit_path, root)?;
 verify_consistency(size1, size2, &proof, root1, root2)?;
 ```
 
-A real `mosslet/key-history/v1` row drops in as a Layer-0 leaf with **zero
-reformatting**; see `metamorphic_log::leaf::key_history_v1`.
+## Defining a leaf (any application)
+
+A log leaf is **opaque, app-defined bytes** — the Merkle layer never inspects
+them, so your canonical record drops in with zero reformatting. You choose a
+versioned context label (`"acme/user-keys/v1"`, `"example-app/audit-event/v2"`,
+…) as the domain separator for the per-record content hash. The bundled
+`metamorphic_log::leaf::key_history_v1` module is a worked example of such a
+record type (and the byte-locked conformance fixture); model your own on it.
 
 ## Single source of truth for primitives
 
