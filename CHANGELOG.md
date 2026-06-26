@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-26
+
+First **automated** release, cut to validate the end-to-end OIDC supply-chain
+pipeline (`.github/workflows/release.yml`): crates.io trusted publishing →
+`wasm-pack` SDK build → CycloneDX SBOM → SHA-512 checksums → keyless cosign
+signatures → build-provenance attestation → npm trusted publishing → GitHub
+Release with artifacts. The `0.1.0` release on both registries was a manual
+bootstrap with no changelog section, no git tag, and no SBOM/cosign/attestation
+artifacts; this is the first tag-driven release, so it both **formally stamps
+the engine work below** (Slices 1–6, already present in the `0.1.0` source) and
+**ships the supply-chain artifacts for the first time**. No source or
+canonical-byte-format changes from `0.1.0` — only the version bump and this
+changelog entry.
+
 ### Added
 
 - **WASM verification + monitor SDK + cross-language byte-parity KAT (Slice 6).**
@@ -202,4 +216,5 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `wasm32-unknown-unknown` check, `rustsec/audit-check`, MSRV-1.85 floor build),
   with all third-party action refs SHA-pinned; Dependabot and FUNDING config.
 
-[Unreleased]: https://github.com/moss-piglet/metamorphic-log/commits/main
+[Unreleased]: https://github.com/moss-piglet/metamorphic-log/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.1
