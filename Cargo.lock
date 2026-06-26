@@ -623,9 +623,9 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "metamorphic-crypto"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8146c6c276f784abad2463dcdae672ec4d1c29fd29f579167ce37204bcf7a446"
+checksum = "b8e632e69cdee178ef3ef01ab71dc5eab808574206f4cf58732772e182dfab6b"
 dependencies = [
  "aes-gcm",
  "argon2",
