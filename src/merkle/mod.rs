@@ -197,6 +197,31 @@ impl MerkleTree {
     }
 }
 
+/// RFC 6962 §2.1 Merkle Tree Hash over a sequence of already-computed node
+/// hashes.
+///
+/// Unlike [`hash_leaf`] (which hashes opaque *record* bytes into a leaf hash),
+/// this combines a slice of existing 32-byte hashes into a single subtree root
+/// using the RFC 6962 split-and-[`hash_children`] recursion, treating each
+/// input as a leaf of the (sub)tree.
+///
+/// This is the recompute primitive the C2SP `tlog-tiles` substrate
+/// ([`crate::tile`]) is built on: a full level-0 tile's 256 leaf hashes combine
+/// via this function into the single entry that the level-1 tile stores for it,
+/// and so on up the tree. An empty slice yields [`empty_root`].
+///
+/// ```
+/// use metamorphic_log::merkle::{hash_leaf, merkle_tree_hash, empty_root};
+/// assert_eq!(merkle_tree_hash(&[]), empty_root());
+/// let a = hash_leaf(b"a");
+/// assert_eq!(merkle_tree_hash(&[a]), a); // single node is its own root
+/// ```
+#[inline]
+#[must_use]
+pub fn merkle_tree_hash(node_hashes: &[Hash]) -> Hash {
+    mth(node_hashes)
+}
+
 /// RFC 6962 §2.1 Merkle Tree Hash over a slice of leaf hashes.
 fn mth(leaves: &[Hash]) -> Hash {
     match leaves.len() {
