@@ -31,6 +31,9 @@ crate-type = ["cdylib", "rlib"]
 metamorphic-crypto = "0.7"
 thiserror = "2"
 
+[dev-dependencies]
+proptest = "1"
+
 [profile.release]
 opt-level = "s"
 lto = true
