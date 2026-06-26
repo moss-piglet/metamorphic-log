@@ -32,8 +32,12 @@ crate-type = ["cdylib", "rlib"]
 # (`ed25519_verify` / `ed25519_sign` / ...) that this crate's `note` module uses
 # to verify classical C2SP witness co-signatures. 0.8.0 adds the classical ECVRF
 # (`ecvrf_prove` / `ecvrf_verify` / ...) that this crate's `vrf` / `coniks`
-# modules use for CONIKS-style index privacy.
-metamorphic-crypto = "0.8.0"
+# modules use for CONIKS-style index privacy. 0.8.1 adds the typed, opaque
+# signature posture accessors (`signature_posture` /
+# `signature_posture_from_signature`, each `-> (Suite, SignatureLevel)`) that the
+# `policy` module uses for declared==observed enforcement, mapping an observed
+# checkpoint key/signature to a posture without re-deriving any private wire tags.
+metamorphic-crypto = "0.8.1"
 thiserror = "2"
 # OS CSPRNG for sampling commitment blinding nonces (prover side). Mirrors
 # metamorphic-crypto's wasm handling: getrandom 0.2 needs its `js` backend on
