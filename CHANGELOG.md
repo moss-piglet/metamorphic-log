@@ -8,6 +8,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Additive hybrid post-quantum checkpoint signing (Slice 3).** A second,
+  *additive* signature line that gives our own verifiers/monitors post-quantum
+  authenticity while the classical Ed25519 line keeps the C2SP witness network
+  able to recompute and co-sign:
+  - `note::SignatureType::MetamorphicHybrid` — the metamorphic-crypto **ML-DSA +
+    classical composite** (strict-AND), verified directly via
+    `metamorphic_crypto::verify`. Assigned the C2SP `signed-note` **`0xff`
+    escape** with a versioned namespaced identifier
+    (`HYBRID_SIG_IDENTIFIER`), so it never squats an assigned/reserved type;
+    no assigned cosignature byte (e.g. single-algorithm `0x06`) fits the hybrid
+    composite construction. Classical Ed25519 stays byte-identical.
+  - `note::sign_hybrid` (over the versioned `HYBRID_SIG_CONTEXT`) and
+    `VerifierKey::new_hybrid`; `VerifierKey` parse/encode and the key-id formula
+    now carry the multi-byte type identifier and the composite public-key
+    material (`tag || classical_pk || ml_dsa_pk`).
+  - `VerifierKey::hybrid_posture_tag` surfaces the composite's self-describing
+    `(Suite, SecurityLevel)` posture byte for the future policy layer
+    (declared == observed), without reimplementing any crypto.
+  - A checkpoint can be co-signed by **both** a witness-compatible Ed25519 key
+    and a PQ composite key; a verifier accepts any mix of trusted key types.
+  - New `Error::HybridSignature` variant; KAT vectors (deterministic
+    composite vkey + a stored signed-note that verifies byte-for-byte — ML-DSA
+    signing is hedged, so *verification* is locked, not the signature bytes) and
+    `proptest` coverage (sign/verify accept-reject, classical+PQ co-existence,
+    cross-type confusion rejection).
+- **C2SP substrate / WRAP (Slice 2).** `tile` (tlog-tiles coordinates,
+  `tile/<L>/<N>[.p/<W>]` paths, partial-tile geometry, recompute-from-tiles),
+  `checkpoint` (tlog-checkpoint signed-tree-head parse/serialize wired to the
+  Slice-1 inclusion/consistency verifier), `note` (byte-exact C2SP signed-note
+  parse/serialize + classical Ed25519 witness verify via
+  `metamorphic_crypto::ed25519_verify`), and a dependency-free `encoding`
+  (strict RFC 4648 base64 + hex). C2SP canonical spec vectors + proptest.
 - **Conformance core (Slice 1).** The verification math for the log:
   - `leaf`: the fixed, length-prefixed canonical-leaf discipline (`u32`-be
     length prefixes, `u64`-be integers, big-endian) with a validated

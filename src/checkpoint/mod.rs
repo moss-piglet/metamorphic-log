@@ -17,8 +17,11 @@
 //! [`crate::proof::verify_consistency`], and an inclusion check against a
 //! checkpoint uses [`crate::proof::verify_inclusion`]. Checkpoints are designed
 //! for external witness co-signing from day one — verification of the signature
-//! lines (classical Ed25519 in this slice; additive hybrid PQ in Slice 3) is
-//! handled by [`crate::note::SignedNote::verify`].
+//! lines is handled by [`crate::note::SignedNote::verify`]. A checkpoint can
+//! carry **both** a classical Ed25519 line (so the C2SP witness network can
+//! recompute and co-sign) **and** an additive hybrid post-quantum composite line
+//! (so our own verifiers/monitors get PQ authenticity); a verifier accepts any
+//! mix of trusted [`crate::note::VerifierKey`] types.
 //!
 //! [`tlog-checkpoint`]: https://c2sp.org/tlog-checkpoint
 
@@ -237,7 +240,7 @@ impl Checkpoint {
 mod tests {
     use super::*;
     use crate::merkle::MerkleTree;
-    use crate::note::sign_ed25519;
+    use crate::note::{sign_ed25519, sign_hybrid};
 
     /// The canonical checkpoint body from the tlog-checkpoint spec.
     const SPEC_BODY: &str =
@@ -321,5 +324,37 @@ mod tests {
             .map(|h| h.to_vec())
             .collect();
         older.verify_consistency(&newer, &cproof).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_co_signed_classical_and_pq() {
+        let mut tree = MerkleTree::new();
+        for i in 0u32..10 {
+            tree.push(&i.to_be_bytes());
+        }
+        let cp = Checkpoint::new("origin.example/log", tree.size(), tree.root()).unwrap();
+        let body = cp.marshal();
+
+        // The log signs the SAME checkpoint body with a classical Ed25519 key
+        // (witness-compatible) and an additive hybrid PQ composite key.
+        let (seed, ed_pk) = metamorphic_crypto::ed25519_generate_keypair();
+        let pq_kp = metamorphic_crypto::generate_signing_keypair();
+        let pq_pk = crate::encoding::base64_decode(&pq_kp.public_key).unwrap();
+
+        let ed_sig = sign_ed25519(&body, "origin.example/log", &seed).unwrap();
+        let pq_sig = sign_hybrid(&body, "origin.example/log-pq", &pq_kp.secret_key).unwrap();
+        let note = SignedNote::new(body, vec![ed_sig, pq_sig]).unwrap();
+
+        let ed_vkey = VerifierKey::new_ed25519("origin.example/log", &ed_pk).unwrap();
+        let pq_vkey = VerifierKey::new_hybrid("origin.example/log-pq", &pq_pk).unwrap();
+
+        // A classical-only witness verifies and recomputes from the Ed25519 line.
+        let parsed_classical =
+            Checkpoint::from_signed_note(&note.marshal(), std::slice::from_ref(&ed_vkey)).unwrap();
+        assert_eq!(parsed_classical, cp);
+
+        // A PQ-aware verifier with both trusted keys verifies the full set.
+        let parsed_pq = Checkpoint::from_signed_note(&note.marshal(), &[ed_vkey, pq_vkey]).unwrap();
+        assert_eq!(parsed_pq, cp);
     }
 }

@@ -30,17 +30,70 @@
 //! <key name>+<hex(key id)>+<base64(signature type || public key)>
 //! ```
 //!
-//! ## Forward-compatibility with additive PQ signatures (Slice 3)
+//! ## Additive hybrid post-quantum signatures (Slice 3)
 //!
 //! The model is intentionally multi-signature and signature-type-tagged. A note
 //! may carry any number of signature lines, and verifiers MUST ignore lines
 //! from unknown keys. This is exactly what lets an **additive hybrid
-//! post-quantum** signature line (a future [`SignatureType`]) slot in alongside
-//! the classical Ed25519 line with **no format churn**: classical witnesses keep
-//! verifying the Ed25519 line, while PQ-aware verifiers additionally check the
-//! PQ line. Only the classical Ed25519 type is implemented in this slice.
+//! post-quantum** signature line ([`SignatureType::MetamorphicHybrid`]) slot in
+//! alongside the classical [`SignatureType::Ed25519`] line with **no format
+//! churn**: classical C2SP witnesses keep verifying (and co-signing) the Ed25519
+//! line and can still recompute the tree, while our own PQ-aware verifiers and
+//! monitors additionally check the composite line for post-quantum authenticity.
+//!
+//! ### Signature-type assignment (the central design decision)
+//!
+//! The additive PQ primitive is the metamorphic-crypto composite signature
+//! ([`metamorphic_crypto::sign`] / [`metamorphic_crypto::verify`]): **ML-DSA
+//! (FIPS 204) + a classical partner (Ed25519, or Ed448/ECDSA-P-521 in the
+//! matched suites), strict-AND**, with a 1-byte version/suite tag prefixing a
+//! self-describing wire format, signing a length-prefixed context-framed message
+//! (`I2OSP(len(ctx),8) || ctx || msg`). This construction matches **no**
+//! C2SP-assigned `signed-note` signature type:
+//!
+//! - `0x06` is **single-algorithm** *timestamped ML-DSA-44 (sub)tree
+//!   cosignatures* (per `c2sp.org/tlog-cosignature`): one algorithm, a timestamp
+//!   prefix, and cosignature-specific note semantics. Reusing it would
+//!   misrepresent our hybrid composite to real ML-DSA-44 cosignature verifiers.
+//! - `0x02` (ECDSA) and `0x04` (timestamped Ed25519 cosignatures) likewise
+//!   describe other constructions.
+//! - `0xfa`–`0xfe` are **reserved for future use by C2SP** — not ours to claim.
+//!
+//! C2SP provides exactly one correct escape: `0xff`, "reserved for signature
+//! types without an identifier byte assigned by this specification", which it
+//! RECOMMENDS be followed by "a longer identifier that is unlikely to collide".
+//! We therefore assign our composite the multi-byte type identifier
+//! [`HYBRID_SIG_IDENTIFIER`] (`0xff` followed by a versioned namespace label).
+//! This is forward-interop-safe: a C2SP verifier that doesn't know our key
+//! simply ignores the line (unknown key), and we never squat an assigned or
+//! reserved byte.
+//!
+//! The signature-type identifier participates in the key id and `vkey` exactly
+//! as the spec describes (`key id = SHA-256(name || 0x0A || type id ||
+//! pubkey)[:4]`; `vkey = name+hex(id)+base64(type id || pubkey)`); the spec's
+//! formula is defined over the full (multi-byte) type identifier, so nothing in
+//! the key-id/`vkey` math changes — only the identifier is longer. The composite
+//! *public key* material carried after the identifier is the metamorphic-crypto
+//! public key bytes (`tag || classical_pk || ml_dsa_pk`); its leading tag
+//! self-describes the `(Suite, SecurityLevel)` posture (see
+//! [`VerifierKey::hybrid_posture_tag`]), which the Slice-5 policy layer can later
+//! reconcile (declared == observed). The composite signature bytes carried after
+//! the key id are the metamorphic-crypto signature blob verbatim.
+//!
+//! ### Signing context
+//!
+//! The composite signs the note text under the fixed, versioned context
+//! [`HYBRID_SIG_CONTEXT`]. This binds a hybrid note signature to its purpose and
+//! is reproduced byte-identically across native Rust, WASM, and the Elixir NIF
+//! (the framing is metamorphic-crypto's `I2OSP(len(ctx),8) || ctx || msg`).
+//! Because ML-DSA signing is hedged/randomized, composite signature **bytes are
+//! not reproducible**, but **verification is fully deterministic** — so our KATs
+//! pin the (deterministic) public key / `vkey` and lock a stored signature that
+//! [`SignedNote::verify`] accepts byte-for-byte.
 //!
 //! [`signed-note`]: https://c2sp.org/signed-note
+//! [`metamorphic_crypto::sign`]: metamorphic_crypto::sign()
+//! [`metamorphic_crypto::verify`]: metamorphic_crypto::verify()
 
 use crate::encoding::{base64_decode, base64_encode, hex_decode, hex_encode};
 use crate::error::{Error, Result};
@@ -53,24 +106,65 @@ const SIG_SPLIT: &str = "\n\n";
 /// requires accepting at least 16; we mirror Go's generous limit of 100.
 const MAX_SIGNATURES: usize = 100;
 
-/// A note signature algorithm, identified by its C2SP `signed-note` type byte.
+/// The C2SP `signed-note` type identifier for the metamorphic-crypto hybrid
+/// composite signature (ML-DSA + classical, strict-AND).
 ///
-/// Only [`SignatureType::Ed25519`] (`0x01`) is supported in this slice. Other
-/// assigned bytes (ECDSA `0x02`, the cosignature/PQ types, etc.) are recognized
-/// as *unknown* for now; an additive hybrid-PQ type lands in Slice 3.
+/// It uses the spec's `0xff` escape ("signature types without an identifier byte
+/// assigned by this specification") followed by a versioned namespace label that
+/// is "unlikely to collide", as the spec RECOMMENDS. See the module-level docs
+/// for why no assigned/reserved byte fits this construction.
+pub const HYBRID_SIG_IDENTIFIER: &[u8] = b"\xffmetamorphic.app/composite-mldsa-ed25519/v1";
+
+/// The fixed, versioned signing context bound into every hybrid composite note
+/// signature (metamorphic-crypto frames it as `I2OSP(len(ctx),8) || ctx ||
+/// note_text`). Changing this label is a breaking change to the hybrid line.
+pub const HYBRID_SIG_CONTEXT: &str = "metamorphic.app/signed-note/v1";
+
+/// A note signature algorithm, identified by its C2SP `signed-note` type
+/// identifier (one or more bytes).
+///
+/// [`SignatureType::Ed25519`] (`0x01`) is the classical, witness-compatible
+/// algorithm. [`SignatureType::MetamorphicHybrid`] (the `0xff`-escaped
+/// [`HYBRID_SIG_IDENTIFIER`]) is the additive post-quantum composite. Other
+/// assigned bytes (ECDSA `0x02`, the cosignature types, etc.) are recognized as
+/// *unknown* and their lines are ignored by verifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SignatureType {
     /// `0x01` — Ed25519 over the note text (RFC 8032).
     Ed25519,
+    /// [`HYBRID_SIG_IDENTIFIER`] — the metamorphic-crypto ML-DSA + classical
+    /// composite (strict-AND), over the note text under [`HYBRID_SIG_CONTEXT`].
+    MetamorphicHybrid,
 }
 
 impl SignatureType {
-    /// The on-the-wire type byte.
+    /// The on-the-wire type identifier (one byte for Ed25519, the multi-byte
+    /// `0xff`-escaped label for the hybrid composite).
     #[must_use]
-    pub fn type_byte(self) -> u8 {
+    pub fn type_identifier(self) -> &'static [u8] {
         match self {
-            SignatureType::Ed25519 => 0x01,
+            SignatureType::Ed25519 => &[0x01],
+            SignatureType::MetamorphicHybrid => HYBRID_SIG_IDENTIFIER,
         }
+    }
+
+    /// Detect the signature type from the leading bytes of encoded key material
+    /// (`type identifier || public key`), returning the type and the byte length
+    /// of its identifier prefix.
+    fn detect(key: &[u8]) -> Result<(SignatureType, usize)> {
+        if key.first() == Some(&0x01) {
+            return Ok((SignatureType::Ed25519, 1));
+        }
+        if key.starts_with(HYBRID_SIG_IDENTIFIER) {
+            return Ok((
+                SignatureType::MetamorphicHybrid,
+                HYBRID_SIG_IDENTIFIER.len(),
+            ));
+        }
+        Err(Error::MalformedNote(format!(
+            "unsupported signature type (leading byte 0x{:02x})",
+            key.first().copied().unwrap_or(0)
+        )))
     }
 }
 
@@ -101,11 +195,40 @@ impl VerifierKey {
                 public_key.len()
             )));
         }
-        let key_id = compute_key_id(name, SignatureType::Ed25519.type_byte(), public_key);
+        let key_id = compute_key_id(name, SignatureType::Ed25519.type_identifier(), public_key);
         Ok(Self {
             name: name.to_string(),
             key_id,
             sig_type: SignatureType::Ed25519,
+            public_key: public_key.to_vec(),
+        })
+    }
+
+    /// Build a hybrid composite verifier key from a name and the
+    /// metamorphic-crypto public key bytes (`tag || classical_pk || ml_dsa_pk`),
+    /// computing the key id per the spec over [`HYBRID_SIG_IDENTIFIER`].
+    ///
+    /// # Errors
+    /// Returns [`Error::MalformedNote`] if the name is invalid or the public key
+    /// is empty.
+    pub fn new_hybrid(name: &str, public_key: &[u8]) -> Result<Self> {
+        if !is_valid_name(name) {
+            return Err(Error::MalformedNote(format!("invalid key name: {name:?}")));
+        }
+        if public_key.is_empty() {
+            return Err(Error::MalformedNote(
+                "hybrid composite public key must be non-empty".into(),
+            ));
+        }
+        let key_id = compute_key_id(
+            name,
+            SignatureType::MetamorphicHybrid.type_identifier(),
+            public_key,
+        );
+        Ok(Self {
+            name: name.to_string(),
+            key_id,
+            sig_type: SignatureType::MetamorphicHybrid,
             public_key: public_key.to_vec(),
         })
     }
@@ -133,7 +256,8 @@ impl VerifierKey {
             return Err(malformed());
         }
 
-        // key id is computed over the full (type-byte || public-key) material.
+        // key id is computed over the full (type-identifier || public-key)
+        // material, exactly as the spec defines it.
         let computed_id = key_hash(name, &key);
         if computed_id != declared_id {
             return Err(Error::MalformedNote(format!(
@@ -141,17 +265,12 @@ impl VerifierKey {
             )));
         }
 
-        let (type_byte, public_key) = (key[0], &key[1..]);
-        let sig_type = match type_byte {
-            0x01 => SignatureType::Ed25519,
-            other => {
-                return Err(Error::MalformedNote(format!(
-                    "unsupported signature type 0x{other:02x}"
-                )));
-            }
-        };
-        if public_key.len() != 32 {
-            return Err(malformed());
+        let (sig_type, id_len) = SignatureType::detect(&key)?;
+        let public_key = &key[id_len..];
+        match sig_type {
+            SignatureType::Ed25519 if public_key.len() != 32 => return Err(malformed()),
+            SignatureType::MetamorphicHybrid if public_key.is_empty() => return Err(malformed()),
+            _ => {}
         }
 
         Ok(Self {
@@ -165,8 +284,9 @@ impl VerifierKey {
     /// Encode this verifier key as a `vkey` string.
     #[must_use]
     pub fn encode(&self) -> String {
-        let mut key = Vec::with_capacity(1 + self.public_key.len());
-        key.push(self.sig_type.type_byte());
+        let id = self.sig_type.type_identifier();
+        let mut key = Vec::with_capacity(id.len() + self.public_key.len());
+        key.extend_from_slice(id);
         key.extend_from_slice(&self.public_key);
         format!(
             "{}+{}+{}",
@@ -192,6 +312,31 @@ impl VerifierKey {
     #[must_use]
     pub fn signature_type(&self) -> SignatureType {
         self.sig_type
+    }
+
+    /// The raw public key material (`type identifier`-stripped): the 32-byte
+    /// Ed25519 key, or the metamorphic-crypto composite public key bytes
+    /// (`tag || classical_pk || ml_dsa_pk`) for a hybrid key.
+    #[must_use]
+    pub fn public_key(&self) -> &[u8] {
+        &self.public_key
+    }
+
+    /// For a [`SignatureType::MetamorphicHybrid`] key, the metamorphic-crypto
+    /// composite **posture tag** — the leading byte of the composite public key
+    /// that self-describes its `(Suite, SecurityLevel)` (e.g. `0x02` = Hybrid
+    /// Cat-3). Returns `None` for non-hybrid keys.
+    ///
+    /// This is informational only; the authoritative posture decode lives in
+    /// metamorphic-crypto. It is surfaced so the Slice-5 `NamespacePolicy` layer
+    /// can later reconcile the *declared* posture against this *observed* tag
+    /// without this crate reimplementing any crypto.
+    #[must_use]
+    pub fn hybrid_posture_tag(&self) -> Option<u8> {
+        match self.sig_type {
+            SignatureType::MetamorphicHybrid => self.public_key.first().copied(),
+            SignatureType::Ed25519 => None,
+        }
     }
 }
 
@@ -377,6 +522,21 @@ impl SignedNote {
                     )
                     .unwrap_or(false)
                 }
+                SignatureType::MetamorphicHybrid => {
+                    // Independently verify the composite (strict-AND ML-DSA +
+                    // classical) via the single-source-of-truth primitive. The
+                    // metamorphic-crypto API speaks base64; a malformed blob or
+                    // key decodes to a verification failure here, never a panic.
+                    let sig_b64 = base64_encode(&sig.signature);
+                    let pk_b64 = base64_encode(&key.public_key);
+                    metamorphic_crypto::verify(
+                        self.text.as_bytes(),
+                        HYBRID_SIG_CONTEXT,
+                        &sig_b64,
+                        &pk_b64,
+                    )
+                    .unwrap_or(false)
+                }
             };
 
             if ok {
@@ -413,7 +573,7 @@ pub fn sign_ed25519(text: &str, name: &str, seed: &[u8]) -> Result<Signature> {
     }
     let public_key = metamorphic_crypto::ed25519_public_key(seed)
         .map_err(|e| Error::MalformedNote(format!("invalid Ed25519 seed: {e}")))?;
-    let key_id = compute_key_id(name, SignatureType::Ed25519.type_byte(), &public_key);
+    let key_id = compute_key_id(name, SignatureType::Ed25519.type_identifier(), &public_key);
     let signature = metamorphic_crypto::ed25519_sign(seed, text.as_bytes())
         .map_err(|e| Error::MalformedNote(format!("Ed25519 signing failed: {e}")))?;
     Ok(Signature {
@@ -423,8 +583,45 @@ pub fn sign_ed25519(text: &str, name: &str, seed: &[u8]) -> Result<Signature> {
     })
 }
 
-/// `keyHash` over the full encoded key material (`type byte || public key`):
-/// the big-endian `u32` of `SHA-256(name || 0x0A || key)[:4]`.
+/// Sign `text` with a metamorphic-crypto hybrid composite secret key (base64
+/// `tag || classical_seed || ml_dsa_seed`), producing an additive PQ
+/// [`Signature`] line for the given key name.
+///
+/// The signature is the composite (strict-AND ML-DSA + classical) over the note
+/// text under [`HYBRID_SIG_CONTEXT`], computed via the single-source-of-truth
+/// [`metamorphic_crypto::sign`]. Because ML-DSA signing is hedged, the bytes are
+/// not reproducible (but verification is deterministic). The matching verifier
+/// key is derived from the secret key's public half (see
+/// [`metamorphic_crypto::derive_public_key`]) and carried in the line's key id.
+///
+/// # Errors
+/// Returns [`Error::MalformedNote`] for an invalid name, and
+/// [`Error::HybridSignature`] if the secret key cannot be decoded/derived or the
+/// composite signature cannot be produced.
+pub fn sign_hybrid(text: &str, name: &str, secret_key_b64: &str) -> Result<Signature> {
+    if !is_valid_name(name) {
+        return Err(Error::MalformedNote(format!("invalid key name: {name:?}")));
+    }
+    let public_key_b64 = metamorphic_crypto::derive_public_key(secret_key_b64)
+        .map_err(|e| Error::HybridSignature(format!("invalid hybrid secret key: {e}")))?;
+    let public_key = base64_decode(&public_key_b64)?;
+    let key_id = compute_key_id(
+        name,
+        SignatureType::MetamorphicHybrid.type_identifier(),
+        &public_key,
+    );
+    let sig_b64 = metamorphic_crypto::sign(text.as_bytes(), HYBRID_SIG_CONTEXT, secret_key_b64)
+        .map_err(|e| Error::HybridSignature(format!("hybrid signing failed: {e}")))?;
+    let signature = base64_decode(&sig_b64)?;
+    Ok(Signature {
+        name: name.to_string(),
+        key_id,
+        signature,
+    })
+}
+
+/// `keyHash` over the full encoded key material (`type identifier || public
+/// key`): the big-endian `u32` of `SHA-256(name || 0x0A || key)[:4]`.
 fn key_hash(name: &str, key: &[u8]) -> u32 {
     let mut buf = Vec::with_capacity(name.len() + 1 + key.len());
     buf.extend_from_slice(name.as_bytes());
@@ -434,10 +631,10 @@ fn key_hash(name: &str, key: &[u8]) -> u32 {
     u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]])
 }
 
-/// Compute the key id from a name, signature-type byte, and public key.
-fn compute_key_id(name: &str, sig_type: u8, public_key: &[u8]) -> u32 {
-    let mut key = Vec::with_capacity(1 + public_key.len());
-    key.push(sig_type);
+/// Compute the key id from a name, signature-type identifier, and public key.
+fn compute_key_id(name: &str, type_id: &[u8], public_key: &[u8]) -> u32 {
+    let mut key = Vec::with_capacity(type_id.len() + public_key.len());
+    key.extend_from_slice(type_id);
     key.extend_from_slice(public_key);
     key_hash(name, &key)
 }
@@ -527,9 +724,89 @@ mod tests {
         let vkey = VerifierKey::parse(SPEC_VKEY).unwrap();
         let recomputed = compute_key_id(
             vkey.name(),
-            SignatureType::Ed25519.type_byte(),
+            SignatureType::Ed25519.type_identifier(),
             &vkey.public_key,
         );
         assert_eq!(recomputed, 0x530d_903a);
+    }
+
+    #[test]
+    fn hybrid_type_identifier_uses_0xff_escape() {
+        // The hybrid identifier MUST start with the C2SP 0xff escape and be
+        // longer than one byte (a namespaced label), per the spec recommendation.
+        let id = SignatureType::MetamorphicHybrid.type_identifier();
+        assert_eq!(id.first(), Some(&0xff));
+        assert!(id.len() > 1);
+        // Ed25519 stays a single 0x01 byte (byte-identical classical path).
+        assert_eq!(SignatureType::Ed25519.type_identifier(), &[0x01]);
+    }
+
+    #[test]
+    fn hybrid_sign_verify_and_vkey_round_trip() {
+        let kp = metamorphic_crypto::generate_signing_keypair(); // Hybrid Cat-3
+        let pk = base64_decode(&kp.public_key).unwrap();
+        let text = "origin.example/log\n7\ncm9vdA==\n".to_string();
+
+        let sig = sign_hybrid(&text, "origin.example/log", &kp.secret_key).unwrap();
+        let note = SignedNote::new(text, vec![sig]).unwrap();
+
+        let vkey = VerifierKey::new_hybrid("origin.example/log", &pk).unwrap();
+        assert_eq!(vkey.signature_type(), SignatureType::MetamorphicHybrid);
+        // Posture tag is the composite's leading byte (0x02 = Hybrid Cat-3).
+        assert_eq!(vkey.hybrid_posture_tag(), Some(0x02));
+        // vkey encodes and re-parses byte-for-byte (multi-byte type identifier).
+        assert_eq!(VerifierKey::parse(&vkey.encode()).unwrap(), vkey);
+
+        let verified = note.verify(&[vkey]).unwrap();
+        assert_eq!(verified.len(), 1);
+
+        // Parse(marshal(x)) == x round trip across the larger PQ blob.
+        let reparsed = SignedNote::parse(&note.marshal()).unwrap();
+        assert_eq!(reparsed, note);
+    }
+
+    #[test]
+    fn hybrid_tampered_text_is_rejected() {
+        let kp = metamorphic_crypto::generate_signing_keypair();
+        let pk = base64_decode(&kp.public_key).unwrap();
+        let text = "origin.example/log\n7\ncm9vdA==\n".to_string();
+        let sig = sign_hybrid(&text, "origin.example/log", &kp.secret_key).unwrap();
+        let note = SignedNote::new(text, vec![sig]).unwrap();
+
+        // Forge a note with the same signatures but different text.
+        let forged = SignedNote::new(
+            "origin.example/log\n8\nZXZpbA==\n".to_string(),
+            note.signatures().to_vec(),
+        )
+        .unwrap();
+        let vkey = VerifierKey::new_hybrid("origin.example/log", &pk).unwrap();
+        assert!(matches!(
+            forged.verify(&[vkey]),
+            Err(Error::InvalidSignature { .. })
+        ));
+    }
+
+    #[test]
+    fn classical_and_hybrid_lines_coexist() {
+        let (seed, ed_pk) = metamorphic_crypto::ed25519_generate_keypair();
+        let kp = metamorphic_crypto::generate_signing_keypair();
+        let pk = base64_decode(&kp.public_key).unwrap();
+        let text = "origin.example/log\n9\ncm9vdA==\n".to_string();
+
+        let ed_sig = sign_ed25519(&text, "origin.example/log", &seed).unwrap();
+        let pq_sig = sign_hybrid(&text, "origin.example/log-pq", &kp.secret_key).unwrap();
+        let note = SignedNote::new(text, vec![ed_sig, pq_sig]).unwrap();
+
+        let ed_vkey = VerifierKey::new_ed25519("origin.example/log", &ed_pk).unwrap();
+        let pq_vkey = VerifierKey::new_hybrid("origin.example/log-pq", &pk).unwrap();
+
+        // A classical-only verifier accepts the note via the Ed25519 line and
+        // ignores the unknown PQ line.
+        assert_eq!(
+            note.verify(std::slice::from_ref(&ed_vkey)).unwrap().len(),
+            1
+        );
+        // A PQ-aware verifier with both keys accepts both lines.
+        assert_eq!(note.verify(&[ed_vkey, pq_vkey]).unwrap().len(), 2);
     }
 }

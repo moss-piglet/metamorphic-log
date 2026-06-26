@@ -44,7 +44,7 @@
 //!
 //! ## Status
 //!
-//! Slices 1–2 are implemented.
+//! Slices 1–3 are implemented.
 //!
 //! **Slice 1 (#327) — conformance core:** the canonical Layer-0 leaf encoding
 //! ([`leaf`]), the fixed RFC 6962 Merkle hashing ([`merkle`]), and RFC 6962 /
@@ -60,8 +60,16 @@
 //! serializes the `tlog-checkpoint` signed-tree-head body and wires it to the
 //! Slice-1 inclusion/consistency verifier; and [`note`] parses/serializes the
 //! `signed-note` format and verifies **classical Ed25519** witness co-signature
-//! lines via [`metamorphic_crypto::ed25519_verify`]. Additive hybrid-PQ
-//! checkpoint signing and the CONIKS VRF layers land in later slices.
+//! lines via [`metamorphic_crypto::ed25519_verify`].
+//!
+//! **Slice 3 (#331) — additive hybrid post-quantum checkpoint signing (Layer
+//! 2):** [`note`] gains an additive [`note::SignatureType::MetamorphicHybrid`]
+//! line — the metamorphic-crypto **ML-DSA + classical composite** (strict-AND),
+//! assigned via the C2SP `0xff` escape with a versioned identifier so it never
+//! squats an assigned type. Classical Ed25519 stays byte-identical, so a
+//! checkpoint can be co-signed by both a witness-compatible Ed25519 key and our
+//! forward-secure PQ key; a verifier accepts any mix of trusted key types. The
+//! CONIKS VRF layer lands in Slice 4.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
