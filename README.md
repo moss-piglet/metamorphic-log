@@ -1,11 +1,10 @@
 # metamorphic-log
 
-A tamper-evident, append-only **transparency log** engine and verification SDK
-for the [Metamorphic](https://metamorphic.app) platform — privacy-first apps by
-[Moss Piglet Corporation](https://mosspiglet.dev), including
-[Mosslet](https://mosslet.com).
+A tamper-evident, append-only **transparency log** engine and verification SDK.
+Built by [Moss Piglet Corporation](https://mosspiglet.dev) to support privacy-
+first software, including [Metamorphic](https://metamorphic.app) and [Mosslet](https://mosslet.com).
 
-It implements the cryptographic *verification core* over an append-only Merkle
+It implements the cryptographic _verification core_ over an append-only Merkle
 log (RFC 6962 / RFC 9162), wraps the [C2SP `tlog-tiles`][tlog-tiles] substrate
 for storage and serving, supports externally **witnessed** checkpoints for
 anti-equivocation, layers in **hybrid post-quantum** checkpoint signatures, and
@@ -18,8 +17,7 @@ adds CONIKS-style index privacy via a swappable VRF.
 
 This crate contains **no cryptographic primitives of its own**. Every hash
 (SHA-256 / SHA3-512), signature (composite hybrid PQ), KEM (ML-KEM), and KDF
-comes from [`metamorphic-crypto`][crypto] — the audited, RustCrypto-only core
-shared across all Metamorphic clients (web/WASM, iOS/UniFFI, Android/UniFFI).
+comes from [`metamorphic-crypto`][crypto], the audited, RustCrypto-only core.
 **There is no parallel crypto stack here.**
 
 ## What a transparency log does — and does not — provide
@@ -37,22 +35,24 @@ A transparency log gives you, **after** you have a key to anchor on:
 It does **not** solve:
 
 - **First-contact / bootstrap trust.** A transparency log cannot tell you whether
-  the *first* key you ever saw for a peer is the genuine one. That remains a
-  Trust-On-First-Use (TOFU) problem, handled elsewhere in the stack (see the
-  Mosslet interim safety-number / signed-key-history work). The log makes a key
-  *accountable over time*; it does not vouch for its origin.
+  the _first_ key you ever saw for a peer is the genuine one. That is a
+  Trust-On-First-Use (TOFU) problem your application must handle separately from
+  this library (for example, with out-of-band fingerprint or safety-number
+  verification). The log makes a key _accountable over time_; it does not vouch
+  for its origin.
 
-## Honest cryptographic posture
+## Cryptographic posture
 
 - **PQ from day one** for integrity, authentication, confidentiality, and
   commitments. Checkpoints are designed for hybrid post-quantum signing via
   `metamorphic-crypto`'s composite (ML-DSA + classical) signatures.
 - **Index-privacy** (the CONIKS VRF) defaults to a classical
   ECVRF-edwards25519 construction (RFC 9381), behind a swappable trait with a
-  hybrid-output path designed in. This is the *only* layer with a classical
+  hybrid-output path designed in. This is the _only_ layer with a classical
   default in v0.1.
-- We describe this as "hybrid PQ signatures, NCC-audited primitives, pure-Rust."
-  We **never** claim "FIPS validated."
+- Primitives are hybrid post-quantum, pure-Rust, and NCC-audited (via
+  `metamorphic-crypto`). They are **not** FIPS-validated, and this project does
+  not claim FIPS validation.
 
 ## Standards spine
 
@@ -67,7 +67,7 @@ It does **not** solve:
 ## Module layout
 
 | Module       | Layer | Responsibility                                              |
-|--------------|-------|-------------------------------------------------------------|
+| ------------ | ----- | ----------------------------------------------------------- |
 | `leaf`       | 0     | Canonical, length-prefixed leaf encoding                    |
 | `merkle`     | 1     | RFC 6962 SHA-256 tree-node hashing (fixed, witness-audited) |
 | `proof`      | 1     | Inclusion + consistency proof verification                  |

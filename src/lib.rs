@@ -12,8 +12,7 @@
 //!
 //! This crate contains **no cryptographic primitives of its own**. Every hash,
 //! signature, KEM, and KDF comes from [`metamorphic_crypto`] — the audited,
-//! RustCrypto-only core shared across all Metamorphic clients. There is no
-//! parallel crypto stack here.
+//! RustCrypto-only core. There is no parallel crypto stack here.
 //!
 //! ## What a transparency log does (and does not) provide
 //!
@@ -22,13 +21,15 @@
 //!   append-only Merkle log.
 //! - **Does NOT provide:** first-contact / bootstrap trust. A transparency log
 //!   cannot tell you whether the *first* key you ever saw for a peer is
-//!   genuine — that remains a Trust-On-First-Use (TOFU) problem solved
-//!   elsewhere in the stack.
+//!   genuine — that is a Trust-On-First-Use (TOFU) problem your application
+//!   must handle separately from this library (e.g. out-of-band fingerprint or
+//!   safety-number verification).
 //!
-//! These layers are honest about their PQ posture: integrity, authentication,
+//! These layers state their PQ posture plainly: integrity, authentication,
 //! confidentiality, and commitments are post-quantum from day one; only
 //! index-privacy (the CONIKS VRF) defaults to a classical construction with a
-//! designed-in hybrid path. We **never** claim "FIPS validated".
+//! designed-in hybrid path. The primitives are not FIPS-validated, and this
+//! project does not claim FIPS validation.
 //!
 //! ## Standards spine
 //!
