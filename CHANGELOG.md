@@ -6,6 +6,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-26
+
+Slice 7 of EPIC #325 — the **final** v0.1 slice. Adds storage-agnostic,
+deterministic **ingestion primitives** to the Rust crate and closes the v0.1
+EPIC. No canonical byte format changes: Layer-1 (RFC 6962 SHA-256 tree, leaf
+byte layout), the Slice-4 CONIKS/VRF formats, and the Slice-5 policy record are
+all untouched. The audited Slice-6 `wasm` shell is unchanged (no new WASM
+exports this slice). The Broadway/GenStage ingest pipeline and real
+object-storage/CDN wiring remain out of scope — they belong to the operator
+layer (mosskeys), per the #290 open-core boundary; these primitives are designed
+to be equally consumable by that future pipeline (and by the deferred #336
+Elixir NIF).
+
+### Added
+
+- **Deterministic ingestion primitives (Slice 7, #337).** A new, I/O-free,
+  storage-agnostic `ingest` module — the OSS engine's contribution to the write
+  path. Pure logic only: no pipeline, no network, no storage backend.
+  - `ingest::Sequencer` — a per-namespace **monotonic sequencer** assigning
+    strictly-increasing, gap-free `u64` positions per namespace (`next`,
+    `peek`, batch `reserve`), with a monotonic-safe `resume_from` for rebuilding
+    state from durable storage on restart (rejects rewinds via the new
+    `Error::SequenceRegression`; block reservations are overflow-checked via
+    `Error::SequenceOverflow`).
+  - `ingest::DedupKey` — an **idempotent-append** dedup key: a deterministic,
+    domain-separated, namespace-scoped SHA3-512 digest (via `metamorphic-crypto`)
+    over the fixed `lp()` discipline, in content (`from_record`) and
+    client-token (`from_token`) modes. A fixed cross-language KAT vector locks
+    the bytes a future Elixir ingester must reproduce.
+  - `ingest::plan_flush` / `tiles_to_flush` / `entry_bundles_to_flush` — the
+    **tile-write/flush geometry**: exactly which C2SP `tlog-tiles` coordinates
+    change when the log grows from `old_size` to `new_size`. Defined purely in
+    terms of the audited `tile` substrate (byte-compatible; finalized tiles are
+    never rewritten), with append-only `Error::SizeRegression` enforcement.
+  - `ingest::TileReader` — the object-storage / CDN **read-path trait**
+    (interface only; **no** backend, **no** I/O in this crate), plus a logic-only
+    `recompute_root_via` bridge that reads level-0 tiles through any `TileReader`
+    and recomputes the RFC 6962 root via the verification core, proving the trait
+    composes without performing any I/O itself.
+- **Ingestion conformance + throughput benchmark.** `tests/ingestion.rs` locks
+  sequencer determinism/replay, the dedup-key KAT + idempotency/separation, the
+  flush geometry against the substrate across a size sweep, and the read-path
+  bridge reproducing a checkpoint root. `benches/ingestion.rs` is a
+  dependency-free (`harness = false`, no criterion) throughput benchmark showing
+  the primitives sit far above the Tessera reference band (~5k–18k entries/sec) —
+  honestly framed as primitive-level, not an end-to-end ingest claim. CI gains
+  dedicated `ingestion` and `throughput-benchmark` jobs, and the `clippy` gate is
+  widened to `--all-targets` (now also linting benches).
+
 ## [0.1.1] - 2026-06-26
 
 First **automated** release, cut to validate the end-to-end OIDC supply-chain
@@ -216,5 +265,6 @@ changelog entry.
   `wasm32-unknown-unknown` check, `rustsec/audit-check`, MSRV-1.85 floor build),
   with all third-party action refs SHA-pinned; Dependabot and FUNDING config.
 
-[Unreleased]: https://github.com/moss-piglet/metamorphic-log/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/moss-piglet/metamorphic-log/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.2
 [0.1.1]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.1
