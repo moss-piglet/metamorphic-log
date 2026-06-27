@@ -6,6 +6,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Slice 8 of EPIC #325 — the **first post-v0.1 anchoring slice**. Adds
+backend-agnostic **anchoring / attestation** support to the Rust crate:
+format + verification for committing a checkpoint's signed tree head to an
+external, hard-to-equivocate medium (blockchain, notary, object-lock storage,
+another transparency log). No canonical byte-format changes to any audited
+layer: Layer-1 (RFC 6962 SHA-256 tree, leaf byte layout), the Slice-4
+CONIKS/VRF formats, and the Slice-5 policy record are all untouched. The
+audited Slice-6 `wasm` shell is unchanged (WASM SDK wiring is deferred this
+slice). The medium clients, anchor cadence, fees, and confirmation depth remain
+out of scope — they belong to the operator layer (mosskeys), per the #290
+open-core boundary. This is **plain anchoring** with zero zero-knowledge; the
+optional ZK enhancement is the separate, design-spike-first #339.
+
+### Added
+
+- **Backend-agnostic anchoring (Slice 8, #338).** A new, I/O-free,
+  backend-agnostic `anchor` module — the OSS engine's contribution to anchoring,
+  owning **format + verification only**.
+  - `anchor::AnchorRecord` — the canonical, byte-locked **attestation record**
+    binding a checkpoint head (`origin` / `size` / `root_hash`) to an **opaque
+    locator** plus an agnostic `anchor::Medium` tag, so a chain tx id, block
+    height, notary receipt, or object key all serialise identically. Uses the
+    fixed `lp()` discipline (big-endian, `u32`-be length prefixes); round-trips
+    byte-for-byte and is itself a valid Layer-0 leaf (`rfc6962_leaf_hash`) so an
+    operator may log its attestations. Designed to be *wrappable* (a future
+    signed envelope can be added additively, mirroring `SignedPolicy`).
+  - `anchor::AnchorCommitment` — a self-describing **safe-menu** commitment
+    algorithm encoded as a tag byte (SHA3-512 in v0.1, sharing
+    `policy::CommitmentHash` tags). The commitment is computed over the
+    medium-independent checkpoint head under a versioned, domain-separated
+    context, so the same head yields the same commitment regardless of medium.
+    Algorithm choice is part of the agreed wire format (not a runtime knob),
+    preventing interop fragmentation / downgrade attacks; adding an algorithm is
+    a deliberate, additive change.
+  - `anchor::verify_anchored` — the **verification helper**: checks an
+    attestation binds a checkpoint and, given a previous anchored head + an
+    RFC 9162 consistency proof (grouped in the forward-stable, `#[non_exhaustive]`
+    `anchor::AnchorLink`), recomputes append-only consistency via
+    `proof::verify_consistency` so a third party audits *no equivocation between
+    anchored heads* without trusting the operator or the medium.
+  - `anchor::CommitmentSink` — the medium **commitment sink trait** (interface
+    only; **no** backend, **no** I/O in this crate; associated `Error`, mirroring
+    the Slice-7 `TileReader`), plus logic-only `anchor_checkpoint_via` /
+    `verify_commitment_via` bridges proving the trait composes with the format
+    without performing any I/O itself.
+  - New `Error::MalformedAnchor` and `Error::AnchorMismatch` variants.
+- **Anchoring conformance.** `tests/anchoring.rs` locks a byte-locked KAT
+  (canonical record bytes + medium-independent commitment + Layer-0 leaf hash) a
+  cross-language operator must reproduce, the consistency-between-anchors audit
+  (accept honest growth, reject an equivocating fork), and the `CommitmentSink`
+  bridge round-trip. CI gains a dedicated `anchoring` job.
+
 ## [0.1.2] - 2026-06-26
 
 Slice 7 of EPIC #325 — the **final** v0.1 slice. Adds storage-agnostic,
