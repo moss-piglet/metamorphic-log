@@ -1,6 +1,6 @@
 [package]
 name = "metamorphic-log"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.85"
 description = "Tamper-evident, append-only transparency log + verification SDK for the Metamorphic platform: RFC 6962/9162 Merkle proofs, C2SP tlog-tiles substrate, witnessed checkpoints, hybrid post-quantum checkpoint signing, and CONIKS-style index privacy. Single source of truth for primitives is metamorphic-crypto."
@@ -16,6 +16,14 @@ wasm-opt = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+# Slice-7 throughput benchmark for the deterministic ingestion primitives.
+# Dependency-free (`harness = false`, std-only — no criterion), keeping the
+# minimal dependency surface. Native-only: it exercises pure logic and is never
+# built for wasm32.
+[[bench]]
+name = "ingestion"
+harness = false
 
 [dependencies]
 # SINGLE SOURCE OF TRUTH for all cryptographic primitives (sha256/sha3_512,

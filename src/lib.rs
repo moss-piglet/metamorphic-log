@@ -44,7 +44,7 @@
 //!
 //! ## Status
 //!
-//! Slices 1–5 are implemented.
+//! Slices 1–7 are implemented.
 //!
 //! **Slice 1 (#327) — conformance core:** the canonical Layer-0 leaf encoding
 //! ([`leaf`]), the fixed RFC 6962 Merkle hashing ([`merkle`]), and RFC 6962 /
@@ -93,6 +93,21 @@
 //! disagrees with the *declared* one — using the metamorphic-crypto v0.8.1
 //! typed posture accessors, re-deriving no private wire tags. This makes posture
 //! *verifiable*, not stronger.
+//!
+//! **Slice 6 (#335) — browser verification + monitor SDK ([`wasm`]):** a thin
+//! `wasm-bindgen` personality over the rlib core, adding no log or crypto logic,
+//! only base64/text marshalling across the JS boundary (proven by the
+//! cross-language byte-parity KAT). Only compiled for `wasm32`.
+//!
+//! **Slice 7 (#337) — deterministic ingestion primitives ([`ingest`]):**
+//! storage-agnostic, I/O-free write-path building blocks — a per-namespace
+//! monotonic [`ingest::Sequencer`], an idempotent-append [`ingest::DedupKey`],
+//! the tile-write/flush geometry ([`ingest::plan_flush`], byte-compatible with
+//! the audited [`tile`] substrate), and the object-storage/CDN read-path
+//! [`ingest::TileReader`] trait (interface only — no backend, no I/O). The
+//! Broadway/GenStage ingest pipeline and real storage/CDN wiring belong to the
+//! operator layer (mosskeys), not this OSS crate (#290 open-core boundary); the
+//! primitives are equally consumable by that future pipeline.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -102,6 +117,7 @@ pub mod commitment;
 pub mod coniks;
 mod encoding;
 pub mod error;
+pub mod ingest;
 pub mod leaf;
 pub mod merkle;
 pub mod note;

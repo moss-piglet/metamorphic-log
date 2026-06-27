@@ -24,7 +24,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Tests
         run: cargo test
@@ -91,6 +91,41 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Slice 7 (#337): the deterministic ingestion primitives. The `test` job above
+  # already runs the whole suite, but this dedicated job keeps the ingestion
+  # conformance (sequencer monotonicity, idempotent-append dedup KAT, tile flush
+  # geometry vs the audited tlog-tiles substrate, and the read-path trait bridge)
+  # individually visible and required.
+  ingestion:
+    name: Ingestion primitives (Slice 7)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Ingestion conformance (lib + integration + doctests)
+        run: |
+          cargo test --lib ingest::
+          cargo test --test ingestion
+          cargo test --doc ingest
+
+  # Slice 7 (#337): throughput benchmark for the ingestion primitives. This is a
+  # dependency-free `harness = false` bench (no criterion). It is NOT an
+  # end-to-end ingest claim (that depends on the operator pipeline + storage
+  # backend, out of scope here); it asserts deliberately conservative floors so a
+  # catastrophic primitive regression fails CI without flaking on a loaded runner.
+  throughput-benchmark:
+    name: Ingestion throughput benchmark (Slice 7)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Run ingestion throughput benchmark
+        run: cargo bench --bench ingestion
 
   msrv:
     # Verify the crate still builds on its declared MSRV (rust-version in

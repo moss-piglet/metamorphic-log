@@ -217,4 +217,29 @@ pub enum Error {
     /// contains its position.
     #[error("no namespace policy in force: {0}")]
     UnknownNamespacePolicy(String),
+
+    /// A per-namespace monotonic [`Sequencer`](crate::ingest::Sequencer) was
+    /// asked to re-seat (via `resume_from`) to a position *below* its current
+    /// one. Rewinding would re-issue an already-assigned position and break the
+    /// append-only ordering, so it is rejected rather than silently applied.
+    #[error(
+        "sequence regression for namespace {namespace:?}: current {current}, requested {requested}"
+    )]
+    SequenceRegression {
+        /// The namespace whose sequencer was being re-seated.
+        namespace: String,
+        /// The sequencer's current next-position.
+        current: u64,
+        /// The (rejected) lower position that was requested.
+        requested: u64,
+    },
+
+    /// A [`Sequencer`](crate::ingest::Sequencer) block reservation would advance
+    /// the per-namespace position past `u64::MAX`. Not reachable in practice
+    /// (it would require more than `2^64` appends in one namespace).
+    #[error("sequence position overflow for namespace {namespace:?}")]
+    SequenceOverflow {
+        /// The namespace whose reservation overflowed.
+        namespace: String,
+    },
 }
