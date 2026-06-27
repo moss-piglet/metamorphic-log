@@ -234,6 +234,23 @@ pub enum Error {
         requested: u64,
     },
 
+    /// An [`AnchorRecord`](crate::anchor::AnchorRecord) (or one of its fields,
+    /// e.g. a [`Medium`](crate::anchor::Medium)) was structurally malformed: an
+    /// unknown format version or commitment-algorithm tag, a length-prefixed
+    /// field that overruns the buffer, a `root_hash` that is not exactly 32
+    /// bytes, an invalid medium identifier, an empty origin/locator, or trailing
+    /// bytes after the record.
+    #[error("malformed anchor record: {0}")]
+    MalformedAnchor(String),
+
+    /// An anchor attestation did not bind the checkpoint it was verified
+    /// against — its head (`origin` / `size` / `root_hash`) disagrees with the
+    /// checkpoint, or a previously-anchored head was for a different origin. The
+    /// attestation does not attest to this checkpoint, so anchoring gives it no
+    /// continuity guarantee.
+    #[error("anchor mismatch: {0}")]
+    AnchorMismatch(String),
+
     /// A [`Sequencer`](crate::ingest::Sequencer) block reservation would advance
     /// the per-namespace position past `u64::MAX`. Not reachable in practice
     /// (it would require more than `2^64` appends in one namespace).

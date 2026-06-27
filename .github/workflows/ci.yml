@@ -111,6 +111,25 @@ jobs:
           cargo test --test ingestion
           cargo test --doc ingest
 
+  # Slice 8 (#338): the backend-agnostic anchoring primitives. The `test` job
+  # above already runs the whole suite, but this dedicated job keeps the
+  # anchoring conformance (byte-locked attestation-record KAT, consistency
+  # between successive anchored heads, and the interface-only CommitmentSink
+  # bridge) individually visible and required.
+  anchoring:
+    name: Anchoring primitives (Slice 8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Anchoring conformance (lib + integration + doctests)
+        run: |
+          cargo test --lib anchor::
+          cargo test --test anchoring
+          cargo test --doc anchor
+
   # Slice 7 (#337): throughput benchmark for the ingestion primitives. This is a
   # dependency-free `harness = false` bench (no criterion). It is NOT an
   # end-to-end ingest claim (that depends on the operator pipeline + storage

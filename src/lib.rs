@@ -44,7 +44,7 @@
 //!
 //! ## Status
 //!
-//! Slices 1–7 are implemented.
+//! Slices 1–8 are implemented.
 //!
 //! **Slice 1 (#327) — conformance core:** the canonical Layer-0 leaf encoding
 //! ([`leaf`]), the fixed RFC 6962 Merkle hashing ([`merkle`]), and RFC 6962 /
@@ -108,10 +108,27 @@
 //! Broadway/GenStage ingest pipeline and real storage/CDN wiring belong to the
 //! operator layer (mosskeys), not this OSS crate (#290 open-core boundary); the
 //! primitives are equally consumable by that future pipeline.
+//!
+//! **Slice 8 (#338) — backend-agnostic anchoring ([`anchor`]):** format +
+//! verification for committing a checkpoint's signed tree head to an external,
+//! hard-to-equivocate medium (blockchain, notary, object-lock storage, another
+//! transparency log). The byte-locked [`anchor::AnchorRecord`] binds a checkpoint
+//! head (`origin`/`size`/`root_hash`) to an opaque locator + an agnostic
+//! [`anchor::Medium`] tag, with a self-describing safe-menu commitment algorithm
+//! ([`anchor::AnchorCommitment`], SHA3-512 in v0.1); [`anchor::verify_anchored`]
+//! recomputes RFC 9162 consistency between successive anchored heads (reusing
+//! [`proof::verify_consistency`]) so a third party audits *no equivocation*
+//! without trusting the operator or the medium; and the interface-only
+//! [`anchor::CommitmentSink`] trait (mirroring the Slice-7
+//! [`ingest::TileReader`]) lets an operator wire a real medium with no I/O in
+//! this crate. This is **plain anchoring** — zero zero-knowledge; the optional
+//! ZK enhancement is the separate #339. Anchor cadence, fees, confirmation
+//! depth, and the medium clients belong to the operator layer (#290).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod anchor;
 pub mod checkpoint;
 pub mod commitment;
 pub mod coniks;
