@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-06-28
+
 Slice 8 of EPIC #325 — the **first post-v0.1 anchoring slice**. Adds
 backend-agnostic **anchoring / attestation** support to the Rust crate:
 format + verification for committing a checkpoint's signed tree head to an
@@ -317,6 +319,7 @@ changelog entry.
   `wasm32-unknown-unknown` check, `rustsec/audit-check`, MSRV-1.85 floor build),
   with all third-party action refs SHA-pinned; Dependabot and FUNDING config.
 
-[Unreleased]: https://github.com/moss-piglet/metamorphic-log/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/moss-piglet/metamorphic-log/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.3
 [0.1.2]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.2
 [0.1.1]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.1
