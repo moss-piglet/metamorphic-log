@@ -46,6 +46,23 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
+      # --- Tag/version guard ---
+      # The release is triggered by a `v*` tag, but `cargo publish` reads the
+      # version from Cargo.toml. If they disagree (e.g. the tag was pushed
+      # before bumping Cargo.toml), `cargo publish` fails deep into the job with
+      # "crate already exists", AFTER the crates.io step but BEFORE npm — leaving
+      # a half-published, inconsistent release. Fail fast here instead.
+      - name: Verify Cargo.toml version matches tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          echo "tag=${tag} Cargo.toml=${crate}"
+          if [ "${tag}" != "${crate}" ]; then
+            echo "::error::Tag v${tag} does not match Cargo.toml version ${crate}. Bump Cargo.toml (and Cargo.lock) before tagging."
+            exit 1
+          fi
+
       # --- Quality gates ---
       - name: Format check
         run: cargo fmt --check
