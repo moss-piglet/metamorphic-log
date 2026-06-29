@@ -47,6 +47,10 @@ use std::collections::BTreeMap;
 use metamorphic_crypto::hash::sha3_512_with_context;
 
 use crate::commitment::{COMMITMENT_LEN, COMMITMENT_OPENING_LEN, Commitment, Opening};
+use crate::directory::{
+    CONIKS_V1, Directory, DirectoryBackendId, DirectoryRoot, DirectoryVerifier, SearchOutcome,
+    SearchProof, SearchResult,
+};
 use crate::error::{Error, Result};
 use crate::vrf::{Vrf, VrfProof, VrfPublicKey, VrfSecretKey};
 
@@ -690,6 +694,112 @@ pub fn verify_absence(
     }
 }
 
+/// Read a CONIKS directory root from the opaque [`DirectoryRoot`] byte wrapper,
+/// rejecting a length other than the SHA3-512 node size.
+fn coniks_root_bytes(root: &DirectoryRoot) -> Result<[u8; NODE_LEN]> {
+    root.as_bytes().try_into().map_err(|_| {
+        Error::MalformedConiksProof(format!(
+            "directory root must be {NODE_LEN} bytes, got {}",
+            root.as_bytes().len()
+        ))
+    })
+}
+
+/// CONIKS implements the swappable [`Directory`] trait (the prover/operator
+/// side) additively over its inherent API — same proofs, same bytes.
+impl Directory for ConiksDirectory {
+    fn backend_id(&self) -> DirectoryBackendId {
+        CONIKS_V1
+    }
+
+    fn root(&self) -> DirectoryRoot {
+        DirectoryRoot::from_bytes(ConiksDirectory::root(self).to_vec())
+    }
+
+    fn search(&self, label: &[u8]) -> Result<SearchResult> {
+        Ok(match self.lookup(label)? {
+            LookupResult::Present(proof) => SearchResult::new(
+                SearchOutcome::Present(proof.value().to_vec()),
+                SearchProof::from_bytes(proof.to_bytes()),
+            ),
+            LookupResult::Absent(proof) => SearchResult::new(
+                SearchOutcome::Absent,
+                SearchProof::from_bytes(proof.to_bytes()),
+            ),
+        })
+    }
+}
+
+/// The relying-party side of CONIKS as a [`DirectoryVerifier`]: it carries the
+/// public inputs the free [`verify_lookup`] / [`verify_absence`] functions need
+/// (namespace, VRF construction, VRF public key) and recomputes everything from
+/// the proof — it never holds or trusts a [`ConiksDirectory`].
+pub struct ConiksVerifier {
+    namespace: Namespace,
+    vrf: Box<dyn Vrf>,
+    vrf_public: VrfPublicKey,
+}
+
+impl ConiksVerifier {
+    /// Build a verifier for `namespace` checking proofs produced under `vrf`
+    /// against `vrf_public`.
+    #[must_use]
+    pub fn new(namespace: Namespace, vrf: Box<dyn Vrf>, vrf_public: VrfPublicKey) -> Self {
+        Self {
+            namespace,
+            vrf,
+            vrf_public,
+        }
+    }
+}
+
+impl DirectoryVerifier for ConiksVerifier {
+    fn backend_id(&self) -> DirectoryBackendId {
+        CONIKS_V1
+    }
+
+    fn verify_search(
+        &self,
+        root: &DirectoryRoot,
+        label: &[u8],
+        proof: &SearchProof,
+    ) -> Result<SearchOutcome> {
+        let root = coniks_root_bytes(root)?;
+        let bytes = proof.as_bytes();
+        // The CONIKS proof bytes are self-tagging (0x00 absence / 0x01
+        // presence), so the discriminator is recovered from the proof itself.
+        match bytes.first() {
+            Some(&TAG_PRESENCE) => {
+                let proof = LookupProof::from_bytes(bytes)?;
+                let value = verify_lookup(
+                    self.vrf.as_ref(),
+                    &self.namespace,
+                    &self.vrf_public,
+                    &root,
+                    label,
+                    &proof,
+                )?;
+                Ok(SearchOutcome::Present(value))
+            }
+            Some(&TAG_ABSENCE) => {
+                let proof = AbsenceProof::from_bytes(bytes)?;
+                verify_absence(
+                    self.vrf.as_ref(),
+                    &self.namespace,
+                    &self.vrf_public,
+                    &root,
+                    label,
+                    &proof,
+                )?;
+                Ok(SearchOutcome::Absent)
+            }
+            _ => Err(Error::MalformedConiksProof(
+                "empty or unrecognized search-proof tag".into(),
+            )),
+        }
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -911,6 +1021,75 @@ mod tests {
         let ns_a = Namespace::parse("a").unwrap();
         let ns_b = Namespace::parse("b").unwrap();
         assert_ne!(ns_a.vrf_input(b"alice"), ns_b.vrf_input(b"alice"));
+    }
+
+    #[test]
+    fn directory_backend_id_is_coniks_v1() {
+        let d = dir();
+        assert_eq!(Directory::backend_id(&d), CONIKS_V1);
+    }
+
+    #[test]
+    fn directory_is_object_safe() {
+        // Compiles + runs only if `Directory` is object-safe — the property a
+        // namespace relies on to hold a `Box<dyn Directory>` per backend.
+        let d: Box<dyn Directory> = Box::new(dir());
+        assert_eq!(d.backend_id(), CONIKS_V1);
+    }
+
+    #[test]
+    fn presence_and_absence_through_trait_object_match_inherent_api() {
+        let mut concrete = dir();
+        concrete.insert(b"alice", b"alice-value").unwrap();
+        concrete.insert(b"bob", b"bob-value").unwrap();
+
+        let verifier: Box<dyn DirectoryVerifier> = Box::new(ConiksVerifier::new(
+            concrete.namespace().clone(),
+            Box::new(Ecvrf),
+            concrete.vrf_public_key().clone(),
+        ));
+        let dir_obj: Box<dyn Directory> = Box::new(concrete);
+        let root = dir_obj.root();
+
+        // Presence through the trait object yields the same value as the
+        // inherent lookup + free verify_lookup path.
+        let present = dir_obj.search(b"alice").unwrap();
+        assert_eq!(
+            present.outcome(),
+            &SearchOutcome::Present(b"alice-value".to_vec())
+        );
+        assert_eq!(
+            verifier
+                .verify_search(&root, b"alice", present.proof())
+                .unwrap(),
+            SearchOutcome::Present(b"alice-value".to_vec())
+        );
+
+        // Absence through the trait object.
+        let absent = dir_obj.search(b"carol").unwrap();
+        assert_eq!(absent.outcome(), &SearchOutcome::Absent);
+        assert_eq!(
+            verifier
+                .verify_search(&root, b"carol", absent.proof())
+                .unwrap(),
+            SearchOutcome::Absent
+        );
+
+        // A tampered root is rejected through the trait, same as the free fn.
+        let bad_root = DirectoryRoot::from_bytes(vec![0u8; root.as_bytes().len()]);
+        assert_eq!(
+            verifier.verify_search(&bad_root, b"alice", present.proof()),
+            Err(Error::ConiksRootMismatch)
+        );
+    }
+
+    #[test]
+    fn trait_object_root_matches_inherent_root() {
+        let mut concrete = dir();
+        concrete.insert(b"alice", b"v").unwrap();
+        let inherent = ConiksDirectory::root(&concrete).to_vec();
+        let via_trait = Directory::root(&concrete).into_bytes();
+        assert_eq!(inherent, via_trait);
     }
 
     use proptest::prelude::*;

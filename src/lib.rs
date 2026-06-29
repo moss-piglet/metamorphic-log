@@ -44,7 +44,7 @@
 //!
 //! ## Status
 //!
-//! Slices 1–8 are implemented.
+//! Slices 1–9b are implemented.
 //!
 //! **Slice 1 (#327) — conformance core:** the canonical Layer-0 leaf encoding
 //! ([`leaf`]), the fixed RFC 6962 Merkle hashing ([`merkle`]), and RFC 6962 /
@@ -124,6 +124,23 @@
 //! this crate. This is **plain anchoring** — zero zero-knowledge; the optional
 //! ZK enhancement is the separate #339. Anchor cadence, fees, confirmation
 //! depth, and the medium clients belong to the operator layer (#290).
+//!
+//! **Slice 9b (#339-adjacent, Slice 9) — swappable directory trait
+//! ([`directory`]):** a pure-scaffold extraction, ahead of the IETF KEYTRANS
+//! combined-tree backend. The object-safe [`directory::Directory`] /
+//! [`directory::DirectoryVerifier`] traits capture the common denominator every
+//! directory family supports — a [`directory::DirectoryBackendId`], a current
+//! [`directory::DirectoryRoot`], and a search-and-verify surface over opaque
+//! [`directory::SearchProof`] bytes — mirroring the swappable [`vrf`] pattern so
+//! a namespace can hold a `Box<dyn Directory>` and swap CONIKS ↔ KEYTRANS
+//! without callers caring. The existing [`coniks`] directory + its free
+//! `verify_lookup` / `verify_absence` functions are refactored *behind* the
+//! trait with **zero behavior change**: no new wire bytes, and every CONIKS KAT
+//! still passes byte-for-byte. KEYTRANS-only surface (fixed-version search,
+//! monitoring, the binary version ladder) is deliberately kept out of the base
+//! trait, landing later as inherent methods / a `KeytransExt` sub-trait. The
+//! backend identifier is *exposed but not yet mixed into proof bytes* (that
+//! would change frozen formats — deferred to a version bump).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -132,6 +149,7 @@ pub mod anchor;
 pub mod checkpoint;
 pub mod commitment;
 pub mod coniks;
+pub mod directory;
 mod encoding;
 pub mod error;
 pub mod ingest;
