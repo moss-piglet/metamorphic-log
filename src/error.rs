@@ -251,6 +251,21 @@ pub enum Error {
     #[error("anchor mismatch: {0}")]
     AnchorMismatch(String),
 
+    /// A KEYTRANS combined-tree structure was malformed: a TLS-presentation-
+    /// language field whose length prefix overruns (or underruns) the buffer, a
+    /// `label` longer than the `<0..2^8-1>` vector allows, a `prefix_tree` /
+    /// `vrf_output` / `commitment` of the wrong fixed length, an implicit
+    /// binary-search-tree timestamp that violates monotonicity, or trailing
+    /// bytes after a struct.
+    ///
+    /// This is the experimental `KEYTRANS_EXP_04` backend's malformed-input
+    /// variant — the analogue of [`Error::MalformedConiksProof`] for the
+    /// combined log-tree + prefix-tree directory. Its byte formats are
+    /// version-tagged and may move until `draft-ietf-keytrans-protocol` reaches
+    /// Last Call, so they are deliberately *not* frozen like the CONIKS path.
+    #[error("malformed keytrans structure: {0}")]
+    MalformedKeytrans(String),
+
     /// A [`Sequencer`](crate::ingest::Sequencer) block reservation would advance
     /// the per-namespace position past `u64::MAX`. Not reachable in practice
     /// (it would require more than `2^64` appends in one namespace).
