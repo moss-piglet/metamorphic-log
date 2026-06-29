@@ -44,7 +44,7 @@
 //!
 //! ## Status
 //!
-//! Slices 1–9b are implemented.
+//! Slices 1–9c are implemented.
 //!
 //! **Slice 1 (#327) — conformance core:** the canonical Layer-0 leaf encoding
 //! ([`leaf`]), the fixed RFC 6962 Merkle hashing ([`merkle`]), and RFC 6962 /
@@ -141,6 +141,26 @@
 //! trait, landing later as inherent methods / a `KeytransExt` sub-trait. The
 //! backend identifier is *exposed but not yet mixed into proof bytes* (that
 //! would change frozen formats — deferred to a version bump).
+//!
+//! **Slice 9c (#339, Slice 9) — KEYTRANS combined-tree core ([`keytrans`]):**
+//! the NEW experimental `KEYTRANS_EXP_04` directory backend's tree-hashing core,
+//! ahead of its proofs (9d) and policy/SDK wiring (9e–9f). A left-balanced
+//! [`keytrans::log_tree`] (§3.2 / §10.8) whose leaf is `Hash(LogEntry{timestamp,
+//! prefix_tree[Nh]})` with `hashContent` `0x00`/`0x01` leaf/parent tagging and
+//! balanced-subtree-head proof compression; a bit-traversal
+//! [`keytrans::prefix_tree`] (§3.3 / §10.9) with `Hash(0x01 || vrf_output ||
+//! commitment)` leaves, `Hash(0x02 || left || right)` parents, and `0^Nh`
+//! stand-in nodes; the [`keytrans::CombinedTree`] root (§3.4); and the
+//! implicit-binary-search-tree timestamp-monotonicity navigation (§4.1 /
+//! Appendix A). The suite hash is **SHA-256** (KEYTRANS interop); the
+//! experimental private suite reuses the SHA3-512 [`commitment`] (the PQ half)
+//! and the [`vrf`] ECVRF-Ed25519 (32-byte-truncated) label. Bytes that feed a
+//! hash use the TLS presentation language via the private, dependency-free
+//! [`keytrans::tls`](keytrans) submodule — the audited length-prefix grammar is
+//! untouched. This backend is **version-tagged and movable**, deliberately
+//! *not* byte-locked like [`leaf::key_history_v1`]; search / fixed-version /
+//! monitor proof verification and the [`directory::Directory`] impl land in
+//! later slices.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -153,6 +173,7 @@ pub mod directory;
 mod encoding;
 pub mod error;
 pub mod ingest;
+pub mod keytrans;
 pub mod leaf;
 pub mod merkle;
 pub mod note;
