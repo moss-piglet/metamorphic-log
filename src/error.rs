@@ -266,6 +266,16 @@ pub enum Error {
     #[error("malformed keytrans structure: {0}")]
     MalformedKeytrans(String),
 
+    /// A KEYTRANS proof was well-formed but did not verify: recomputing the
+    /// combined-tree / prefix-tree / log-tree root from the proof's public
+    /// inputs did not reproduce the expected root. This is the headline negative
+    /// outcome of KEYTRANS proof verification — the analogue of
+    /// [`Error::ConiksRootMismatch`] for the experimental `KEYTRANS_EXP_04`
+    /// backend (a tampered value, opening, copath, retained head, or root all
+    /// surface here).
+    #[error("keytrans proof root mismatch: recomputed root does not match the expected root")]
+    KeytransRootMismatch,
+
     /// A [`Sequencer`](crate::ingest::Sequencer) block reservation would advance
     /// the per-namespace position past `u64::MAX`. Not reachable in practice
     /// (it would require more than `2^64` appends in one namespace).
