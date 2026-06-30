@@ -34,6 +34,8 @@ use wasm_bindgen::prelude::*;
 use crate::checkpoint::Checkpoint;
 use crate::commitment::{Commitment, Opening};
 use crate::coniks::{AbsenceProof, LookupProof, Namespace};
+use crate::directory::DirectoryBackendId;
+use crate::keytrans::KeytransVerifier;
 use crate::leaf::key_history_v1::Entry;
 use crate::note::{SignedNote, VerifierKey};
 use crate::policy::{CommitmentHash, NamespacePolicy, SignedPolicy};
@@ -393,9 +395,92 @@ pub fn policy_enforce_commitment_hash(signed_b64: &str, observed: &str) -> Resul
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers (logic-free marshalling only)
+// Experimental KEYTRANS combined-tree directory: search / fixed-version /
+// monitor verification (KEYTRANS_EXP_04 — version-tagged, MOVABLE bytes)
 // ---------------------------------------------------------------------------
 
+/// Verify an experimental **KEYTRANS** greatest-version search proof (§6)
+/// against a combined-tree root.
+///
+/// `context` is the commitment context label; `vrf_public_b64` the
+/// ECVRF-Ed25519 public key; `root_b64` the 32-byte combined-tree root;
+/// `label_b64` the searched label bytes; `proof_b64` the movable `tls`
+/// search-proof blob (e.g. from a `Directory::search` result). Returns
+/// `{ present: bool, valueB64: string | null }`; throws on any verification
+/// failure.
+///
+/// **Experimental / movable:** these proof bytes are `KEYTRANS_EXP_04`-tagged
+/// and move with `draft-ietf-keytrans-protocol`; they are deliberately *not*
+/// frozen like the `key_history_v1` / CONIKS / policy-v1 vectors.
+#[wasm_bindgen(js_name = "keytransVerifySearch")]
+pub fn keytrans_verify_search(
+    context: &str,
+    vrf_public_b64: &str,
+    root_b64: &str,
+    label_b64: &str,
+    proof_b64: &str,
+) -> Result<JsValue, JsValue> {
+    let verifier = keytrans_verifier(context, vrf_public_b64)?;
+    let outcome = verifier
+        .verify_search_bytes(&decode(root_b64)?, &decode(label_b64)?, &decode(proof_b64)?)
+        .map_err(to_js)?;
+    Ok(search_outcome_to_js(&outcome))
+}
+
+/// Verify an experimental KEYTRANS fixed-version search proof (§7). Same inputs
+/// as [`keytrans_verify_search`]; returns `{ present, valueB64 }`.
+#[wasm_bindgen(js_name = "keytransVerifyFixedVersion")]
+pub fn keytrans_verify_fixed_version(
+    context: &str,
+    vrf_public_b64: &str,
+    root_b64: &str,
+    label_b64: &str,
+    proof_b64: &str,
+) -> Result<JsValue, JsValue> {
+    let verifier = keytrans_verifier(context, vrf_public_b64)?;
+    let outcome = verifier
+        .verify_fixed_version_bytes(&decode(root_b64)?, &decode(label_b64)?, &decode(proof_b64)?)
+        .map_err(to_js)?;
+    Ok(search_outcome_to_js(&outcome))
+}
+
+/// Verify an experimental KEYTRANS monitoring proof (§8). Returns `true` if the
+/// monitored version's binary ladder is all inclusions under the root; throws
+/// on a downgrade or any inconsistency.
+#[wasm_bindgen(js_name = "keytransVerifyMonitor")]
+pub fn keytrans_verify_monitor(
+    context: &str,
+    vrf_public_b64: &str,
+    root_b64: &str,
+    label_b64: &str,
+    proof_b64: &str,
+) -> Result<bool, JsValue> {
+    let verifier = keytrans_verifier(context, vrf_public_b64)?;
+    verifier
+        .verify_monitor_bytes(&decode(root_b64)?, &decode(label_b64)?, &decode(proof_b64)?)
+        .map_err(to_js)
+}
+
+/// Enforce **declared == observed** for an observed directory backend id
+/// (Slice 9e): the verified policy's declared route + suite must match the
+/// backend that served a proof. `observed_backend_id` is the raw `u16` code
+/// (e.g. `0x0001` CONIKS, `0xF004` KEYTRANS_EXP_04). Returns `true` on match;
+/// throws on mismatch.
+#[wasm_bindgen(js_name = "policyEnforceDirectoryBackend")]
+pub fn policy_enforce_directory_backend(
+    signed_b64: &str,
+    observed_backend_id: u16,
+) -> Result<bool, JsValue> {
+    let policy = verified_policy(signed_b64)?;
+    policy
+        .enforce_directory_backend(DirectoryBackendId::from_u16(observed_backend_id))
+        .map_err(to_js)?;
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers (logic-free marshalling only)
+// ---------------------------------------------------------------------------
 /// Decode a base64 string into bytes, surfacing decode errors as JS exceptions.
 fn decode(s: &str) -> Result<Vec<u8>, JsValue> {
     b64::decode(s).map_err(|e| JsValue::from_str(&format!("base64 decode error: {e}")))
@@ -475,6 +560,30 @@ fn verified_policy(signed_b64: &str) -> Result<NamespacePolicy, JsValue> {
     Ok(signed.policy().clone())
 }
 
+/// Build a KEYTRANS relying-party verifier from the commitment context and the
+/// ECVRF-Ed25519 public key (the experimental private suite's VRF).
+fn keytrans_verifier(context: &str, vrf_public_b64: &str) -> Result<KeytransVerifier, JsValue> {
+    let vrf_public = VrfPublicKey::from_bytes(decode(vrf_public_b64)?);
+    Ok(KeytransVerifier::new(context, Box::new(Ecvrf), vrf_public))
+}
+
+/// Build the `{ present, valueB64 }` object from a verified search outcome.
+fn search_outcome_to_js(outcome: &crate::directory::SearchOutcome) -> JsValue {
+    use crate::directory::SearchOutcome;
+    let obj = js_sys::Object::new();
+    match outcome {
+        SearchOutcome::Present(value) => {
+            set(&obj, "present", &JsValue::TRUE);
+            set(&obj, "valueB64", &b64::encode(value).into());
+        }
+        SearchOutcome::Absent => {
+            set(&obj, "present", &JsValue::FALSE);
+            set(&obj, "valueB64", &JsValue::NULL);
+        }
+    }
+    obj.into()
+}
+
 /// Build the `{ origin, size, rootB64, extensions }` checkpoint object.
 fn checkpoint_to_js(cp: &Checkpoint) -> JsValue {
     let obj = js_sys::Object::new();
@@ -491,7 +600,7 @@ fn checkpoint_to_js(cp: &Checkpoint) -> JsValue {
 
 /// Build the declared-posture object from a verified policy.
 fn policy_to_js(policy: &NamespacePolicy) -> Result<JsValue, JsValue> {
-    use crate::policy::{CheckpointSuite, SecurityLevel, VrfMode};
+    use crate::policy::{CheckpointSuite, DirectoryMode, KeytransSuite, SecurityLevel, VrfMode};
 
     let security_level = match policy.security_level() {
         SecurityLevel::Cat3 => "cat3",
@@ -511,6 +620,15 @@ fn policy_to_js(policy: &NamespacePolicy) -> Result<JsValue, JsValue> {
         VrfMode::HybridOutput => "hybridOutput",
         VrfMode::PurePqExperimental => "purePqExperimental",
     };
+    let directory_mode = match policy.directory_mode() {
+        DirectoryMode::Coniks => "coniks",
+        DirectoryMode::Keytrans => "keytrans",
+    };
+    let keytrans_suite = match policy.keytrans_suite() {
+        KeytransSuite::MetamorphicHybridExp => "metamorphicHybridExp",
+        KeytransSuite::Kt128Sha256Ed25519 => "kt128Sha256Ed25519",
+        KeytransSuite::Kt128Sha256P256 => "kt128Sha256P256",
+    };
 
     let obj = js_sys::Object::new();
     set(&obj, "namespace", &policy.namespace().as_str().into());
@@ -523,6 +641,8 @@ fn policy_to_js(policy: &NamespacePolicy) -> Result<JsValue, JsValue> {
     set(&obj, "checkpointSuite", &checkpoint_suite.into());
     set(&obj, "commitmentHash", &commitment_hash.into());
     set(&obj, "vrfMode", &vrf_mode.into());
+    set(&obj, "directoryMode", &directory_mode.into());
+    set(&obj, "keytransSuite", &keytrans_suite.into());
     set(
         &obj,
         "effectiveFrom",
