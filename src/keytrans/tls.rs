@@ -99,6 +99,18 @@ impl<'a> Reader<'a> {
         Ok(self.take(len, what)?.to_vec())
     }
 
+    /// Read a `uint16` (big-endian).
+    fn u16(&mut self, what: &str) -> Result<u16> {
+        let b = self.take(2, what)?;
+        Ok(u16::from_be_bytes([b[0], b[1]]))
+    }
+
+    /// Read an `opaque x<0..2^16-1>` vector (2-byte length header).
+    fn vec_u16(&mut self, what: &str) -> Result<Vec<u8>> {
+        let len = self.u16(what)? as usize;
+        Ok(self.take(len, what)?.to_vec())
+    }
+
     /// Read an `opaque x<0..2^32-1>` vector (4-byte length header).
     fn vec_u32(&mut self, what: &str) -> Result<Vec<u8>> {
         let len = self.u32(what)? as usize;
@@ -139,6 +151,20 @@ fn write_vec_u32(out: &mut Vec<u8>, bytes: &[u8], what: &str) -> Result<()> {
     let len = u32::try_from(bytes.len()).map_err(|_| {
         Error::MalformedKeytrans(format!(
             "{what}: {} bytes exceeds the <0..2^32-1> vector bound",
+            bytes.len()
+        ))
+    })?;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+/// Append a `2`-byte-length-prefixed (`<0..2^16-1>`) vector, validating the
+/// length bound.
+fn write_vec_u16(out: &mut Vec<u8>, bytes: &[u8], what: &str) -> Result<()> {
+    let len = u16::try_from(bytes.len()).map_err(|_| {
+        Error::MalformedKeytrans(format!(
+            "{what}: {} bytes exceeds the <0..2^16-1> vector bound (65535)",
             bytes.len()
         ))
     })?;
@@ -375,6 +401,193 @@ impl LogEntry {
     }
 }
 
+// ===========================================================================
+// Slice 9d proof wire structs (§11.1 / §11.2) — experimental, MOVABLE.
+// ===========================================================================
+
+use super::prefix_tree::{PrefixLeaf, PrefixProof, PrefixSearchResultType, SEARCH_KEY_LEN};
+use crate::commitment::{COMMITMENT_LEN, Commitment};
+
+/// `PrefixSearchResultType` (§11.2) wire codes.
+const PREFIX_RESULT_INCLUSION: u8 = 1;
+const PREFIX_RESULT_NON_INCLUSION_LEAF: u8 = 2;
+const PREFIX_RESULT_NON_INCLUSION_PARENT: u8 = 3;
+
+/// Encode a left-to-right list of `Hash.Nh`-byte node values as the §11.1 /
+/// §11.2 `HashValue elements<0..2^16-1>` field (a 2-byte byte-length header
+/// followed by the concatenated 32-byte hashes).
+///
+/// # Errors
+/// [`Error::MalformedKeytrans`] if the encoded byte length exceeds the
+/// `<0..2^16-1>` vector bound.
+pub fn encode_hash_vector(hashes: &[[u8; NH]]) -> Result<Vec<u8>> {
+    let mut body = Vec::with_capacity(hashes.len() * NH);
+    for h in hashes {
+        body.extend_from_slice(h);
+    }
+    let mut out = Vec::with_capacity(2 + body.len());
+    write_vec_u16(&mut out, &body, "HashValue elements")?;
+    Ok(out)
+}
+
+/// Decode a §11.1 / §11.2 `HashValue elements<0..2^16-1>` field into a list of
+/// `Hash.Nh`-byte node values.
+///
+/// # Errors
+/// [`Error::MalformedKeytrans`] if the length header overruns the buffer, the
+/// body is not a whole number of [`NH`]-byte hashes, or there are trailing
+/// bytes.
+pub fn decode_hash_vector(bytes: &[u8]) -> Result<Vec<[u8; NH]>> {
+    let mut r = Reader::new(bytes);
+    let hashes = read_hash_vector(&mut r, "HashValue elements")?;
+    r.finish("HashValue elements")?;
+    Ok(hashes)
+}
+
+/// Read a `HashValue elements<0..2^16-1>` field from `r`.
+fn read_hash_vector(r: &mut Reader<'_>, what: &str) -> Result<Vec<[u8; NH]>> {
+    let body = r.vec_u16(what)?;
+    if body.len() % NH != 0 {
+        return Err(Error::MalformedKeytrans(format!(
+            "{what}: {} bytes is not a multiple of the {NH}-byte hash size",
+            body.len()
+        )));
+    }
+    Ok(body
+        .chunks_exact(NH)
+        .map(|c| {
+            let mut h = [0u8; NH];
+            h.copy_from_slice(c);
+            h
+        })
+        .collect())
+}
+
+/// The KEYTRANS log-tree batch inclusion/consistency proof (§11.1
+/// `InclusionProof`): the left-to-right `elements` node values.
+///
+/// ```text
+/// struct {
+///   HashValue elements<0..2^16-1>;
+/// } InclusionProof;
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InclusionProof {
+    /// The provided balanced-subtree head values, in left-to-right order.
+    pub elements: Vec<[u8; NH]>,
+}
+
+impl InclusionProof {
+    /// Serialize to canonical TLS-PL bytes.
+    ///
+    /// # Errors
+    /// [`Error::MalformedKeytrans`] if the encoded `elements` exceed the
+    /// `<0..2^16-1>` bound.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        encode_hash_vector(&self.elements)
+    }
+
+    /// Parse canonical TLS-PL bytes.
+    ///
+    /// # Errors
+    /// [`Error::MalformedKeytrans`] on a malformed length header or trailing
+    /// bytes.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        Ok(Self {
+            elements: decode_hash_vector(bytes)?,
+        })
+    }
+}
+
+impl PrefixProof {
+    /// Serialize a single-key prefix-tree proof to canonical TLS-PL bytes
+    /// (§11.2 `PrefixProof`, with a one-element `results` array).
+    ///
+    /// The experimental private suite carries the full 64-byte
+    /// [`crate::commitment`] in a `nonInclusionLeaf` leaf rather than the spec's
+    /// 32-byte `Hash.Nh` commitment — a documented, version-tagged deviation.
+    ///
+    /// # Errors
+    /// [`Error::MalformedKeytrans`] if the result/copath sizes exceed their
+    /// vector bounds.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        // results<0..2^8-1>: one PrefixSearchResult.
+        let mut result = Vec::new();
+        match self.result_type {
+            PrefixSearchResultType::Inclusion => result.push(PREFIX_RESULT_INCLUSION),
+            PrefixSearchResultType::NonInclusionParent => {
+                result.push(PREFIX_RESULT_NON_INCLUSION_PARENT);
+            }
+            PrefixSearchResultType::NonInclusionLeaf => {
+                result.push(PREFIX_RESULT_NON_INCLUSION_LEAF);
+                let leaf = self.leaf.as_ref().ok_or_else(|| {
+                    Error::MalformedKeytrans("nonInclusionLeaf proof is missing its leaf".into())
+                })?;
+                result.extend_from_slice(&leaf.vrf_output);
+                result.extend_from_slice(leaf.commitment.as_bytes());
+            }
+        }
+        result.push(self.depth);
+
+        let mut out = Vec::new();
+        write_vec_u8(&mut out, &result, "PrefixProof.results")?;
+        out.extend_from_slice(&encode_hash_vector(&self.copath)?);
+        Ok(out)
+    }
+
+    /// Parse a single-key prefix-tree proof from canonical TLS-PL bytes.
+    ///
+    /// # Errors
+    /// [`Error::MalformedKeytrans`] on an unknown result type, a `results` array
+    /// that is not exactly one entry, a malformed length header, or trailing
+    /// bytes.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(bytes);
+        let results = r.vec_u8("PrefixProof.results")?;
+        let mut rr = Reader::new(&results);
+        let result_type_byte = rr.u8("PrefixSearchResult.result_type")?;
+        let (result_type, leaf) = match result_type_byte {
+            PREFIX_RESULT_INCLUSION => (PrefixSearchResultType::Inclusion, None),
+            PREFIX_RESULT_NON_INCLUSION_PARENT => {
+                (PrefixSearchResultType::NonInclusionParent, None)
+            }
+            PREFIX_RESULT_NON_INCLUSION_LEAF => {
+                let vrf_output: [u8; SEARCH_KEY_LEN] = rr
+                    .take(SEARCH_KEY_LEN, "PrefixLeaf.vrf_output")?
+                    .try_into()
+                    .expect("take returned SEARCH_KEY_LEN bytes");
+                let commitment: [u8; COMMITMENT_LEN] = rr
+                    .take(COMMITMENT_LEN, "PrefixLeaf.commitment")?
+                    .try_into()
+                    .expect("take returned COMMITMENT_LEN bytes");
+                (
+                    PrefixSearchResultType::NonInclusionLeaf,
+                    Some(PrefixLeaf {
+                        vrf_output,
+                        commitment: Commitment::from_bytes(commitment),
+                    }),
+                )
+            }
+            other => {
+                return Err(Error::MalformedKeytrans(format!(
+                    "unknown PrefixSearchResultType {other}"
+                )));
+            }
+        };
+        let depth = rr.u8("PrefixSearchResult.depth")?;
+        rr.finish("PrefixProof.results (expected exactly one result)")?;
+
+        let copath = read_hash_vector(&mut r, "PrefixProof.elements")?;
+        r.finish("PrefixProof")?;
+        Ok(Self {
+            result_type,
+            leaf,
+            depth,
+            copath,
+        })
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -503,5 +716,79 @@ mod tests {
         .encode();
         trailing.push(0xFF);
         assert!(LogEntry::decode(&trailing).is_err()); // trailing byte
+    }
+
+    #[test]
+    fn inclusion_proof_round_trips() {
+        let proof = InclusionProof {
+            elements: vec![[0x11; NH], [0x22; NH], [0x33; NH]],
+        };
+        let bytes = proof.encode().unwrap();
+        // 2-byte length header = 3 * 32 = 96 bytes.
+        assert_eq!(&bytes[..2], &[0x00, 0x60]);
+        assert_eq!(InclusionProof::decode(&bytes).unwrap(), proof);
+    }
+
+    #[test]
+    fn inclusion_proof_empty_and_misaligned() {
+        let empty = InclusionProof { elements: vec![] };
+        assert_eq!(empty.encode().unwrap(), vec![0x00, 0x00]);
+        assert_eq!(InclusionProof::decode(&[0x00, 0x00]).unwrap(), empty);
+        // A body whose length is not a multiple of NH is rejected.
+        assert!(InclusionProof::decode(&[0x00, 0x05, 1, 2, 3, 4, 5]).is_err());
+    }
+
+    #[test]
+    fn prefix_proof_round_trips_all_result_types() {
+        use super::super::prefix_tree::{PrefixLeaf, PrefixProof, PrefixSearchResultType};
+
+        let inclusion = PrefixProof {
+            result_type: PrefixSearchResultType::Inclusion,
+            leaf: None,
+            depth: 2,
+            copath: vec![[0xAA; NH], [0xBB; NH]],
+        };
+        let bytes = inclusion.encode().unwrap();
+        assert_eq!(PrefixProof::decode(&bytes).unwrap(), inclusion);
+
+        let parent = PrefixProof {
+            result_type: PrefixSearchResultType::NonInclusionParent,
+            leaf: None,
+            depth: 1,
+            copath: vec![[0xCC; NH], [0xDD; NH]],
+        };
+        let bytes = parent.encode().unwrap();
+        assert_eq!(PrefixProof::decode(&bytes).unwrap(), parent);
+
+        let non_incl_leaf = PrefixProof {
+            result_type: PrefixSearchResultType::NonInclusionLeaf,
+            leaf: Some(PrefixLeaf {
+                vrf_output: [0x5A; SEARCH_KEY_LEN],
+                commitment: Commitment::from_bytes([0x6B; COMMITMENT_LEN]),
+            }),
+            depth: 3,
+            copath: vec![[0x01; NH], [0x02; NH], [0x03; NH]],
+        };
+        let bytes = non_incl_leaf.encode().unwrap();
+        assert_eq!(PrefixProof::decode(&bytes).unwrap(), non_incl_leaf);
+    }
+
+    #[test]
+    fn prefix_proof_rejects_unknown_result_type_and_trailing() {
+        use super::super::prefix_tree::{PrefixProof, PrefixSearchResultType};
+        // results = [0xFF, depth=0]; unknown result type 0xFF.
+        let bytes = vec![0x02, 0xFF, 0x00, 0x00, 0x00];
+        assert!(PrefixProof::decode(&bytes).is_err());
+
+        // Trailing byte after a well-formed inclusion proof is rejected.
+        let p = PrefixProof {
+            result_type: PrefixSearchResultType::Inclusion,
+            leaf: None,
+            depth: 0,
+            copath: vec![],
+        };
+        let mut bytes = p.encode().unwrap();
+        bytes.push(0xAB);
+        assert!(PrefixProof::decode(&bytes).is_err());
     }
 }

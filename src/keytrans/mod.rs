@@ -63,6 +63,8 @@
 #[allow(dead_code)]
 mod tls;
 
+pub mod ext;
+pub mod ladder;
 pub mod log_tree;
 pub mod prefix_tree;
 
@@ -70,6 +72,10 @@ use crate::commitment::{Commitment, Opening, commit_with_opening};
 use crate::error::{Error, Result};
 use crate::vrf::VrfOutput;
 
+pub use ext::{
+    KeytransDirectory, KeytransExt, KeytransFixedVersionProof, KeytransMonitorProof,
+    KeytransSearchProof, KeytransVerifier, LadderStep, RevealedValue,
+};
 pub use prefix_tree::{PrefixTree, SEARCH_KEY_LEN};
 
 /// Length in bytes of the cipher-suite hash output (`Hash.Nh`): SHA-256, so

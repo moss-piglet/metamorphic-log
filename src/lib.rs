@@ -161,6 +161,34 @@
 //! *not* byte-locked like [`leaf::key_history_v1`]; search / fixed-version /
 //! monitor proof verification and the [`directory::Directory`] impl land in
 //! later slices.
+//!
+//! **Slice 9d (#339, Slice 9) — KEYTRANS proofs ([`keytrans`]):** the
+//! relying-party-verifiable proof surface over the 9c core, in the CONIKS
+//! recompute-from-public-inputs posture. [`keytrans::ladder`] implements the §5
+//! / Appendix B binary ladders (`base` / `fixed_version` / `monitor` /
+//! `greatest_version`) and the §6.1 Reasonable-Monitoring-Window
+//! distinguished-entry selection over the implicit BST.
+//! [`keytrans::prefix_tree`] gains single-key proof generation and free
+//! `verify_inclusion` / `verify_absence` (§11.2 inclusion / nonInclusionLeaf /
+//! nonInclusionParent, recomputing the prefix root from the copath with `0^Nh`
+//! stand-ins). [`keytrans::log_tree`] gains
+//! [`keytrans::log_tree::verify_batch`] — composed inclusion + consistency
+//! (§11.1) recombining proved leaves, retained full-subtree heads, and provided
+//! balanced-subtree heads, including the §11.1 **MUST** check that a redundant
+//! retained head matches its recomputed value. The private `keytrans::tls`
+//! submodule gains the §11.1 `InclusionProof` and §11.2 `PrefixProof` /
+//! `PrefixSearchResult` / `PrefixLeaf` wire structs (`uint16` vectors).
+//! [`keytrans::KeytransDirectory`] implements the base [`directory::Directory`]
+//! through greatest-version search (§6); the additive, object-safe
+//! [`keytrans::KeytransExt`] sub-trait adds §7 fixed-version and §8 monitor
+//! proofs without touching the base trait or the CONIKS impl; and
+//! [`keytrans::KeytransVerifier`] recomputes every root from public inputs
+//! (VRF-verifying each `(label, version)` lookup, the prefix copath, then the
+//! log-tree inclusion) under the new experimental backend id
+//! [`directory::KEYTRANS_EXP_V04`]. Everything is `KEYTRANS_EXP_04`-tagged and
+//! **movable**; proofs are produced against the current log head (the §6–§8
+//! frontier-recursion drivers are a separable, movable refinement), and no
+//! frozen public wire bytes are added.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

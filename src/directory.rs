@@ -78,6 +78,17 @@ impl DirectoryBackendId {
 /// The shipped CONIKS prefix-tree directory backend ([`crate::coniks`]).
 pub const CONIKS_V1: DirectoryBackendId = DirectoryBackendId::from_u16(0x0001);
 
+/// The experimental KEYTRANS combined-tree directory backend
+/// ([`crate::keytrans`]), `KEYTRANS_EXP_04`.
+///
+/// The code `0xF004` sits in the §15.1 `0xF000–0xFFFF` "Reserved for Private
+/// Use" range (matching the private cipher suite
+/// [`crate::keytrans::KT_EXP_METAMORPHIC_HYBRID`] = `0xF000`), with the low
+/// nibble `4` tracking the pinned `draft-ietf-keytrans-protocol-04`. It is
+/// **experimental and version-tagged**, *not* a frozen wire identifier: it is
+/// bumped when the draft advances, never byte-locked like [`CONIKS_V1`].
+pub const KEYTRANS_EXP_V04: DirectoryBackendId = DirectoryBackendId::from_u16(0xF004);
+
 /// A directory's current root: the published value every proof recomputes
 /// against. The concrete bytes are defined by the backend (for CONIKS, the
 /// 64-byte SHA3-512 prefix-tree root); callers treat them as opaque.
