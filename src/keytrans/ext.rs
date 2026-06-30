@@ -137,6 +137,61 @@ pub struct KeytransMonitorProof {
     pub ladder: Vec<LadderStep>,
 }
 
+impl KeytransSearchProof {
+    /// Serialize to the experimental, **movable** `tls` search-proof byte blob
+    /// (the object-safe [`SearchProof`] payload). Bytes move with the draft.
+    ///
+    /// # Errors
+    /// [`Error::MalformedKeytrans`] if an embedded vector exceeds its bound.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        tls::encode_search_proof(self)
+    }
+
+    /// Parse from the `tls` search-proof byte blob.
+    ///
+    /// # Errors
+    /// [`Error::MalformedKeytrans`] on a malformed blob.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        tls::decode_search_proof(bytes)
+    }
+}
+
+impl KeytransFixedVersionProof {
+    /// Serialize to the experimental, movable `tls` fixed-version byte blob.
+    ///
+    /// # Errors
+    /// [`Error::MalformedKeytrans`] if an embedded vector exceeds its bound.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        tls::encode_fixed_version_proof(self)
+    }
+
+    /// Parse from the `tls` fixed-version byte blob.
+    ///
+    /// # Errors
+    /// [`Error::MalformedKeytrans`] on a malformed blob.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        tls::decode_fixed_version_proof(bytes)
+    }
+}
+
+impl KeytransMonitorProof {
+    /// Serialize to the experimental, movable `tls` monitor byte blob.
+    ///
+    /// # Errors
+    /// [`Error::MalformedKeytrans`] if an embedded vector exceeds its bound.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        tls::encode_monitor_proof(self)
+    }
+
+    /// Parse from the `tls` monitor byte blob.
+    ///
+    /// # Errors
+    /// [`Error::MalformedKeytrans`] on a malformed blob.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        tls::decode_monitor_proof(bytes)
+    }
+}
+
 /// Per-label operator state: the ordered version history.
 #[derive(Clone, Debug, Default)]
 struct LabelState {
@@ -458,10 +513,11 @@ impl Directory for KeytransDirectory {
             (Some(_), Some(r)) => SearchOutcome::Present(r.value.clone()),
             _ => SearchOutcome::Absent,
         };
-        Ok(SearchResult::new(
-            outcome,
-            SearchProof::from_bytes(Vec::new()),
-        ))
+        // Encode the typed proof into the object-safe, byte-oriented
+        // `SearchProof` (the experimental, movable `tls` wire), so a
+        // `Box<dyn DirectoryVerifier>` can verify it without the typed surface.
+        let bytes = tls::encode_search_proof(&proof)?;
+        Ok(SearchResult::new(outcome, SearchProof::from_bytes(bytes)))
     }
 }
 
@@ -714,6 +770,67 @@ impl KeytransVerifier {
         }
         Ok(())
     }
+
+    // --- Byte-oriented verify (decode the movable `tls` wire, then dispatch to
+    //     the typed verify above). These back the object-safe `DirectoryVerifier`
+    //     trait and the WASM SDK, so a `Box<dyn DirectoryVerifier>` / a browser
+    //     can verify a KEYTRANS proof without the typed surface. ---
+
+    /// Verify a byte-encoded greatest-version search proof (§6) against a
+    /// byte-encoded combined root, returning the recomputed [`SearchOutcome`].
+    ///
+    /// # Errors
+    /// [`Error::MalformedKeytrans`] if `root` is not [`NH`] bytes or the proof
+    /// blob is malformed; otherwise as
+    /// [`verify_search`](Self::verify_search).
+    pub fn verify_search_bytes(
+        &self,
+        root: &[u8],
+        label: &[u8],
+        proof: &[u8],
+    ) -> Result<SearchOutcome> {
+        let root = root_array(root)?;
+        let typed = tls::decode_search_proof(proof)?;
+        self.verify_search(&root, label, &typed)
+    }
+
+    /// Verify a byte-encoded fixed-version search proof (§7).
+    ///
+    /// # Errors
+    /// As [`verify_search_bytes`](Self::verify_search_bytes).
+    pub fn verify_fixed_version_bytes(
+        &self,
+        root: &[u8],
+        label: &[u8],
+        proof: &[u8],
+    ) -> Result<SearchOutcome> {
+        let root = root_array(root)?;
+        let typed = tls::decode_fixed_version_proof(proof)?;
+        self.verify_fixed_version(&root, label, &typed)
+    }
+
+    /// Verify a byte-encoded monitoring proof (§8). Returns `true` on success
+    /// (a non-throwing boolean for the SDK).
+    ///
+    /// # Errors
+    /// As [`verify_search_bytes`](Self::verify_search_bytes); a downgrade is
+    /// [`Error::KeytransRootMismatch`].
+    pub fn verify_monitor_bytes(&self, root: &[u8], label: &[u8], proof: &[u8]) -> Result<bool> {
+        let root = root_array(root)?;
+        let typed = tls::decode_monitor_proof(proof)?;
+        self.verify_monitor(&root, label, &typed)?;
+        Ok(true)
+    }
+}
+
+/// Convert opaque root bytes into the fixed [`NH`]-byte combined-tree root.
+fn root_array(root: &[u8]) -> Result<[u8; NH]> {
+    root.try_into().map_err(|_| {
+        Error::MalformedKeytrans(format!(
+            "combined root must be {NH} bytes, got {}",
+            root.len()
+        ))
+    })
 }
 
 impl DirectoryVerifier for KeytransVerifier {
@@ -723,21 +840,15 @@ impl DirectoryVerifier for KeytransVerifier {
 
     fn verify_search(
         &self,
-        _root: &DirectoryRoot,
-        _label: &[u8],
-        _proof: &SearchProof,
+        root: &DirectoryRoot,
+        label: &[u8],
+        proof: &SearchProof,
     ) -> Result<SearchOutcome> {
-        // The opaque byte-oriented base-trait verify path is not wired for the
-        // experimental KEYTRANS backend in this slice: proofs are verified
-        // through the richly-typed inherent `verify_search` /
-        // `verify_fixed_version` / `verify_monitor` above, which recompute from
-        // public inputs. A byte-encoded `SearchProof` round-trip (built on the
-        // movable `keytrans::tls` wire structs) is a follow-up (9e).
-        Err(Error::MalformedKeytrans(
-            "KEYTRANS byte-oriented DirectoryVerifier::verify_search is not wired yet (9e); \
-             use KeytransVerifier::verify_search with a typed proof"
-                .into(),
-        ))
+        // The object-safe byte path: decode the movable `tls` search-proof wire
+        // and dispatch to the typed, recompute-from-public-inputs verify. The
+        // richly-typed inherent `verify_search` / `verify_fixed_version` /
+        // `verify_monitor` remain available for callers that hold typed proofs.
+        self.verify_search_bytes(root.as_bytes(), label, proof.as_bytes())
     }
 }
 
@@ -918,5 +1029,75 @@ mod tests {
         dir.update(b"alice", b"value", 1_000, &opening(1)).unwrap();
         let result = Directory::search(&dir, b"alice").unwrap();
         assert_eq!(result.outcome(), &SearchOutcome::Present(b"value".to_vec()));
+    }
+
+    #[test]
+    fn byte_oriented_verify_search_round_trips_through_trait() {
+        // The object-safe `Box<dyn Directory>` -> `Box<dyn DirectoryVerifier>`
+        // path: search produces an opaque `SearchProof` blob that the verifier
+        // decodes (the movable `tls` wire) and validates from public inputs.
+        let mut dir = directory();
+        dir.update(b"alice", b"head-v0", 1_000, &opening(1))
+            .unwrap();
+        dir.update(b"alice", b"head-v1", 2_000, &opening(2))
+            .unwrap();
+        dir.update(b"bob", b"bob-v0", 3_000, &opening(3)).unwrap();
+
+        let verifier: Box<dyn DirectoryVerifier> = Box::new(verifier(&dir));
+        let boxed: Box<dyn Directory> = Box::new(dir);
+        let root = boxed.root();
+        let result = boxed.search(b"alice").unwrap();
+        let (outcome, proof) = result.into_parts();
+        assert_eq!(outcome, SearchOutcome::Present(b"head-v1".to_vec()));
+
+        let verified = verifier.verify_search(&root, b"alice", &proof).unwrap();
+        assert_eq!(verified, SearchOutcome::Present(b"head-v1".to_vec()));
+
+        // A tampered root is rejected through the byte path too.
+        let mut bad = root.into_bytes();
+        bad[0] ^= 0xFF;
+        assert!(
+            verifier
+                .verify_search(&DirectoryRoot::from_bytes(bad), b"alice", &proof)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn byte_oriented_fixed_version_and_monitor_round_trip() {
+        let mut dir = directory();
+        for i in 0..5u32 {
+            dir.update(
+                b"alice",
+                format!("v{i}").as_bytes(),
+                1_000 + u64::from(i) * 1_000,
+                &opening(i as u8 + 1),
+            )
+            .unwrap();
+        }
+        let root = dir.combined_root().unwrap();
+        let v = verifier(&dir);
+
+        let fv = dir.prove_fixed_version(b"alice", 2).unwrap();
+        let fv_bytes = fv.encode().unwrap();
+        assert_eq!(
+            v.verify_fixed_version_bytes(&root, b"alice", &fv_bytes)
+                .unwrap(),
+            SearchOutcome::Present(b"v2".to_vec())
+        );
+
+        let mon = dir.prove_monitor(b"alice", 3).unwrap();
+        let mon_bytes = mon.encode().unwrap();
+        assert!(v.verify_monitor_bytes(&root, b"alice", &mon_bytes).unwrap());
+
+        // Round-trip the typed proofs through the wire too.
+        assert_eq!(
+            KeytransFixedVersionProof::decode(&fv_bytes)
+                .unwrap()
+                .step
+                .version,
+            2
+        );
+        assert_eq!(KeytransMonitorProof::decode(&mon_bytes).unwrap().version, 3);
     }
 }

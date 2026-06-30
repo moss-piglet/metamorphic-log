@@ -189,6 +189,32 @@
 //! **movable**; proofs are produced against the current log head (the §6–§8
 //! frontier-recursion drivers are a separable, movable refinement), and no
 //! frozen public wire bytes are added.
+//!
+//! **Slice 9e (#339, Slice 9) — KEYTRANS policy + WASM + cross-language KAT:**
+//! the experimental KEYTRANS backend becomes *selectable* and *verifiable from
+//! the SDK*. [`policy::NamespacePolicy`] gains two Layer-3 posture axes mirroring
+//! the [`policy::VrfMode`] reserved-but-rejected pattern: [`policy::DirectoryMode`]
+//! (`Coniks` default / `Keytrans`) and [`policy::KeytransSuite`]
+//! (`MetamorphicHybridExp` = the legal `0xF000` private hybrid-PQ suite; the
+//! standard `Kt128Sha256{Ed25519,P256}` suites are **reserved but rejected**
+//! until `metamorphic-crypto` exposes their on-spec HMAC-SHA256 commitment).
+//! The record format is bumped to [`policy::POLICY_FORMAT_VERSION`] `= 2`, but
+//! **backward-compatibly**: a default CONIKS-route policy still serializes as a
+//! v1 record, so every frozen Slice-5 policy KAT round-trips byte-for-byte;
+//! only a `Keytrans`-route policy emits a v2 record. `declared == observed`
+//! extends to the directory backend
+//! ([`policy::NamespacePolicy::enforce_directory_backend`]). The 9d byte-oriented
+//! [`directory::DirectoryVerifier::verify_search`] stub is now **wired**: the
+//! private `keytrans::tls` submodule gains a movable, length-prefix-disciplined
+//! wire codec for the top-level search / fixed-version / monitor proofs, so a
+//! `Box<dyn DirectoryVerifier>` (and the browser SDK) decodes an opaque
+//! [`directory::SearchProof`] and dispatches to the typed
+//! recompute-from-public-inputs verify (the typed inherent methods remain). The
+//! [`wasm`] SDK surfaces `keytransVerifySearch` / `keytransVerifyFixedVersion` /
+//! `keytransVerifyMonitor` and `policyEnforceDirectoryBackend`, and a
+//! version-tagged Rust↔JS byte-parity KAT (explicitly **movable**, separate from
+//! the frozen `key_history_v1` vectors) locks the experimental suite. Everything
+//! stays `KEYTRANS_EXP_04`-tagged; the KEYTRANS wire bytes are **not** frozen.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

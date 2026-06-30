@@ -93,15 +93,30 @@
 use metamorphic_crypto::{SignatureLevel, Suite};
 
 use crate::coniks::Namespace;
+use crate::directory::{CONIKS_V1, DirectoryBackendId, KEYTRANS_EXP_V04};
 use crate::error::{Error, Result};
 use crate::leaf::{ContextLabel, content_hash};
 use crate::merkle::{Hash, hash_leaf};
 
-/// The fixed canonical byte-layout version of the [`NamespacePolicy`] record
-/// (the discipline version, distinct from the per-record
-/// [`NamespacePolicy::policy_schema_version`]). A layout change is a new value
-/// here, never a silent reinterpretation.
-pub const POLICY_FORMAT_VERSION: u32 = 1;
+/// The highest canonical byte-layout version of the [`NamespacePolicy`] record
+/// this build emits and accepts (the discipline version, distinct from the
+/// per-record [`NamespacePolicy::policy_schema_version`]). A layout change is a
+/// new value here, never a silent reinterpretation.
+///
+/// **v1 → v2 (Slice 9e).** v1 records (the only layout through Slice 5–9d)
+/// carry the four posture axes (`security_level`, `checkpoint_suite`,
+/// `commitment_hash`, `vrf_mode`). v2 *appends* the two Layer-3 directory axes
+/// ([`DirectoryMode`] + [`KeytransSuite`]). The layout is **backward
+/// compatible**: a policy on the default CONIKS route serializes byte-for-byte
+/// as a v1 record (the appended axes are at their defaults and omitted), so
+/// every frozen v1 vector still round-trips unchanged; only a policy that
+/// selects the experimental [`DirectoryMode::Keytrans`] route emits a v2 record.
+/// [`NamespacePolicy::parse`] reads both versions.
+pub const POLICY_FORMAT_VERSION: u32 = 2;
+
+/// The original v1 record layout (the four-axis posture record). Still emitted
+/// verbatim for CONIKS-route policies so the frozen Slice-5 KATs are unchanged.
+const POLICY_FORMAT_VERSION_V1: u32 = 1;
 
 /// The fixed canonical byte-layout version of the [`SignedPolicy`] envelope.
 pub const SIGNED_POLICY_FORMAT_VERSION: u32 = 1;
@@ -320,6 +335,133 @@ impl VrfMode {
     }
 }
 
+/// The Layer-3 **directory backend route** a namespace declares (Slice 9e,
+/// design §3.3). This is the directory-layer analogue of [`VrfMode`]: a tagged
+/// posture axis whose non-default value was *reserved-but-rejected* until the
+/// backend was built.
+///
+/// - [`DirectoryMode::Coniks`] (default) selects the shipped, frozen CONIKS
+///   prefix-tree directory ([`crate::coniks`], [`crate::directory::CONIKS_V1`]).
+/// - [`DirectoryMode::Keytrans`] selects the experimental IETF KEYTRANS
+///   combined-tree directory ([`crate::keytrans`],
+///   [`crate::directory::KEYTRANS_EXP_V04`]). As of Slice 9e it is **legal as an
+///   experimental, version-tagged route** (no longer rejected at validation),
+///   so a namespace can opt into the industry-aligned KEYTRANS construction; the
+///   route is only meaningful together with a [`KeytransSuite`].
+///
+/// The route is recorded so a relying party can enforce **declared == observed**
+/// on the backend that actually served a proof (see
+/// [`NamespacePolicy::enforce_directory_backend`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DirectoryMode {
+    /// Classic CONIKS sparse prefix tree — the default and, through Slice 9d,
+    /// the only route. Serializes as a v1 record.
+    #[default]
+    Coniks,
+    /// Experimental IETF KEYTRANS combined tree (`KEYTRANS_EXP_04`). Legal as an
+    /// experimental route from Slice 9e; selects a v2 record.
+    Keytrans,
+}
+
+impl DirectoryMode {
+    const TAG_CONIKS: u8 = 0x01;
+    const TAG_KEYTRANS: u8 = 0x02;
+
+    fn tag(self) -> u8 {
+        match self {
+            DirectoryMode::Coniks => Self::TAG_CONIKS,
+            DirectoryMode::Keytrans => Self::TAG_KEYTRANS,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self> {
+        match tag {
+            Self::TAG_CONIKS => Ok(DirectoryMode::Coniks),
+            Self::TAG_KEYTRANS => Ok(DirectoryMode::Keytrans),
+            other => Err(Error::MalformedPolicy(format!(
+                "unknown directory_mode tag 0x{other:02x}"
+            ))),
+        }
+    }
+}
+
+/// The Layer-3 **KEYTRANS cipher suite** a namespace declares (Slice 9e, design
+/// §3.3), only meaningful when [`DirectoryMode::Keytrans`] is the route. This
+/// mirrors [`VrfMode`]'s reserved-but-rejected pattern: the spec's standard
+/// suites have their wire identifiers **reserved** here so the policy menu is
+/// industry-aligned and forward-compatible, but they are **rejected at
+/// validation** because this crate does not build their HMAC-SHA256 commitment
+/// (it ships the post-quantum SHA3-512 commitment instead).
+///
+/// - [`KeytransSuite::MetamorphicHybridExp`] (`0xF000`, default) — the private,
+///   experimental hybrid-PQ suite: SHA-256 trees for KEYTRANS interop, the
+///   SHA3-512 [`crate::commitment`] (the PQ half), composite hybrid-PQ tree-head
+///   signatures, and ECVRF-Ed25519 labels. The **only legal** suite in v0.1.
+/// - [`KeytransSuite::Kt128Sha256Ed25519`] (`0x0002`) /
+///   [`KeytransSuite::Kt128Sha256P256`] (`0x0001`) — the spec's standard suites
+///   (HMAC-SHA256 commitment, ECVRF-Ed25519 / ECVRF-P256). **Reserved but
+///   rejected**: validatable only once `metamorphic-crypto` exposes the
+///   on-spec HMAC-SHA256 commitment + P-256 VRF primitives (a later slice). The
+///   identifiers exist now so no developer choosing on-spec interop is locked
+///   out of the policy surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum KeytransSuite {
+    /// `0xF000` — the experimental private hybrid-PQ suite (default, legal).
+    #[default]
+    MetamorphicHybridExp,
+    /// `0x0002` — standard `KT128_SHA256_Ed25519` (reserved; not yet built).
+    Kt128Sha256Ed25519,
+    /// `0x0001` — standard `KT128_SHA256_P256` (reserved; not yet built).
+    Kt128Sha256P256,
+}
+
+impl KeytransSuite {
+    const ID_METAMORPHIC_HYBRID_EXP: u16 = crate::keytrans::KT_EXP_METAMORPHIC_HYBRID;
+    const ID_KT128_SHA256_ED25519: u16 = 0x0002;
+    const ID_KT128_SHA256_P256: u16 = 0x0001;
+
+    /// The §15.1 cipher-suite identifier carried on the wire.
+    #[must_use]
+    pub fn suite_id(self) -> u16 {
+        match self {
+            KeytransSuite::MetamorphicHybridExp => Self::ID_METAMORPHIC_HYBRID_EXP,
+            KeytransSuite::Kt128Sha256Ed25519 => Self::ID_KT128_SHA256_ED25519,
+            KeytransSuite::Kt128Sha256P256 => Self::ID_KT128_SHA256_P256,
+        }
+    }
+
+    fn from_id(id: u16) -> Result<Self> {
+        match id {
+            Self::ID_METAMORPHIC_HYBRID_EXP => Ok(KeytransSuite::MetamorphicHybridExp),
+            Self::ID_KT128_SHA256_ED25519 => Ok(KeytransSuite::Kt128Sha256Ed25519),
+            Self::ID_KT128_SHA256_P256 => Ok(KeytransSuite::Kt128Sha256P256),
+            other => Err(Error::MalformedPolicy(format!(
+                "unknown keytrans_suite id 0x{other:04x}"
+            ))),
+        }
+    }
+
+    /// Whether this suite has a built construction in v0.1 (the typed analogue
+    /// of [`VrfMode::expected_vrf_suite_id`] returning `Some`). Only the
+    /// experimental private suite is built; the standard suites are reserved.
+    #[must_use]
+    pub fn is_built(self) -> bool {
+        matches!(self, KeytransSuite::MetamorphicHybridExp)
+    }
+
+    /// The directory [`DirectoryBackendId`] this suite is served under, or
+    /// `None` for a reserved (not-yet-built) suite. Drives **declared ==
+    /// observed** for the directory backend (the suite analogue of
+    /// [`CheckpointSuite::crypto_suite`]).
+    #[must_use]
+    pub fn backend_id(self) -> Option<DirectoryBackendId> {
+        match self {
+            KeytransSuite::MetamorphicHybridExp => Some(KEYTRANS_EXP_V04),
+            KeytransSuite::Kt128Sha256Ed25519 | KeytransSuite::Kt128Sha256P256 => None,
+        }
+    }
+}
+
 /// The versioned, canonical, signed-in-log per-namespace policy record.
 ///
 /// Construct via [`NamespacePolicy::new`] (which validates well-formedness),
@@ -337,6 +479,8 @@ pub struct NamespacePolicy {
     effective_from: u64,
     created_at: u64,
     prev_policy_hash: Option<[u8; POLICY_HASH_LEN]>,
+    directory_mode: DirectoryMode,
+    keytrans_suite: KeytransSuite,
 }
 
 impl NamespacePolicy {
@@ -374,6 +518,50 @@ impl NamespacePolicy {
             effective_from,
             created_at,
             prev_policy_hash,
+            directory_mode: DirectoryMode::Coniks,
+            keytrans_suite: KeytransSuite::MetamorphicHybridExp,
+        };
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    /// Build and validate a namespace policy on the experimental **KEYTRANS**
+    /// directory route (Slice 9e). Identical to [`NamespacePolicy::new`] but
+    /// selects [`DirectoryMode::Keytrans`] under the given [`KeytransSuite`],
+    /// emitting a v2 record.
+    ///
+    /// The suite must be *built* ([`KeytransSuite::is_built`]); a reserved
+    /// standard suite is [`Error::MalformedPolicy`] (the
+    /// reserved-but-rejected wall).
+    ///
+    /// # Errors
+    /// Returns [`Error::MalformedPolicy`] for any well-formedness violation
+    /// (including a not-yet-built `keytrans_suite`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_keytrans(
+        namespace: Namespace,
+        policy_schema_version: u32,
+        security_level: SecurityLevel,
+        checkpoint_suite: CheckpointSuite,
+        commitment_hash: CommitmentHash,
+        vrf_mode: VrfMode,
+        effective_from: u64,
+        created_at: u64,
+        prev_policy_hash: Option<[u8; POLICY_HASH_LEN]>,
+        keytrans_suite: KeytransSuite,
+    ) -> Result<Self> {
+        let policy = Self {
+            namespace,
+            policy_schema_version,
+            security_level,
+            checkpoint_suite,
+            commitment_hash,
+            vrf_mode,
+            effective_from,
+            created_at,
+            prev_policy_hash,
+            directory_mode: DirectoryMode::Keytrans,
+            keytrans_suite,
         };
         policy.validate()?;
         Ok(policy)
@@ -439,6 +627,31 @@ impl NamespacePolicy {
                 "prev_policy_hash must be 64 bytes".into(),
             ));
         }
+        // Layer-3 directory axes (Slice 9e). The KEYTRANS suite is only
+        // meaningful on the KEYTRANS route; on the CONIKS route it must be the
+        // default so the record serializes as a backward-compatible v1 layout.
+        match self.directory_mode {
+            DirectoryMode::Coniks => {
+                if self.keytrans_suite != KeytransSuite::default() {
+                    return Err(Error::MalformedPolicy(format!(
+                        "keytrans_suite {:?} is only meaningful on the Keytrans route",
+                        self.keytrans_suite
+                    )));
+                }
+            }
+            DirectoryMode::Keytrans => {
+                // Reserved-but-rejected wall: only the built experimental suite
+                // is legal in v0.1 (mirrors VrfMode::PurePqExperimental).
+                if !self.keytrans_suite.is_built() {
+                    return Err(Error::MalformedPolicy(format!(
+                        "keytrans_suite {:?} is reserved but not built in v0.1 \
+                         (only MetamorphicHybridExp); on-spec HMAC-SHA256 suites \
+                         await the metamorphic-crypto commitment primitive",
+                        self.keytrans_suite
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -476,6 +689,43 @@ impl NamespacePolicy {
     #[must_use]
     pub fn vrf_mode(&self) -> VrfMode {
         self.vrf_mode
+    }
+
+    /// The declared Layer-3 directory route (Slice 9e).
+    #[must_use]
+    pub fn directory_mode(&self) -> DirectoryMode {
+        self.directory_mode
+    }
+
+    /// The declared KEYTRANS cipher suite (Slice 9e). Only meaningful when
+    /// [`directory_mode`](Self::directory_mode) is [`DirectoryMode::Keytrans`];
+    /// the default [`KeytransSuite`] otherwise.
+    #[must_use]
+    pub fn keytrans_suite(&self) -> KeytransSuite {
+        self.keytrans_suite
+    }
+
+    /// The fixed canonical byte-layout version this policy serializes to: `1`
+    /// for the default CONIKS route (a backward-compatible v1 record) and `2`
+    /// when the experimental [`DirectoryMode::Keytrans`] route is selected.
+    #[must_use]
+    fn format_version(&self) -> u32 {
+        match self.directory_mode {
+            DirectoryMode::Coniks => POLICY_FORMAT_VERSION_V1,
+            DirectoryMode::Keytrans => POLICY_FORMAT_VERSION,
+        }
+    }
+
+    /// The directory [`DirectoryBackendId`] this policy declares it will be
+    /// served under: [`crate::directory::CONIKS_V1`] on the CONIKS route, or the
+    /// declared [`KeytransSuite`]'s backend id on the KEYTRANS route (`None` if
+    /// that suite is reserved/not built).
+    #[must_use]
+    pub fn declared_directory_backend_id(&self) -> Option<DirectoryBackendId> {
+        match self.directory_mode {
+            DirectoryMode::Coniks => Some(CONIKS_V1),
+            DirectoryMode::Keytrans => self.keytrans_suite.backend_id(),
+        }
     }
 
     /// The tree size / checkpoint index at which this version takes force.
@@ -516,7 +766,7 @@ impl NamespacePolicy {
             "{}/{}/v{}",
             self.namespace.as_str(),
             Self::RECORD_TYPE,
-            POLICY_FORMAT_VERSION
+            self.format_version()
         ))
     }
 
@@ -524,7 +774,7 @@ impl NamespacePolicy {
     ///
     /// ```text
     /// canonical(policy) =
-    ///     u32_be(POLICY_FORMAT_VERSION = 1)
+    ///     u32_be(format_version)          // 1 (CONIKS route) or 2 (KEYTRANS route)
     ///  || lp(namespace)
     ///  || u32_be(policy_schema_version)
     ///  || u8(security_level tag)
@@ -533,14 +783,19 @@ impl NamespacePolicy {
     ///  || u8(vrf_mode tag)
     ///  || u64_be(effective_from)
     ///  || u64_be(created_at)
-    ///  || lp(prev_policy_hash)   // 0-length for genesis
+    ///  || lp(prev_policy_hash)            // 0-length for genesis
+    ///  || [ u8(directory_mode tag) || u16_be(keytrans_suite id) ]   // v2 only
     /// ```
+    ///
+    /// The v2 directory axes are **appended** after the v1 fields, so a
+    /// CONIKS-route policy (the default) emits exactly the v1 byte layout and
+    /// every frozen Slice-5 vector round-trips unchanged.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let ns = self.namespace.as_str().as_bytes();
         let prev: &[u8] = self.prev_policy_hash.as_ref().map_or(&[], |h| h.as_slice());
         let mut out = Vec::with_capacity(4 + 4 + ns.len() + 4 + 4 + 8 + 8 + 4 + prev.len());
-        out.extend_from_slice(&POLICY_FORMAT_VERSION.to_be_bytes());
+        out.extend_from_slice(&self.format_version().to_be_bytes());
         push_lp(&mut out, ns);
         out.extend_from_slice(&self.policy_schema_version.to_be_bytes());
         out.push(self.security_level.tag());
@@ -550,11 +805,17 @@ impl NamespacePolicy {
         out.extend_from_slice(&self.effective_from.to_be_bytes());
         out.extend_from_slice(&self.created_at.to_be_bytes());
         push_lp(&mut out, prev);
+        if self.directory_mode != DirectoryMode::Coniks {
+            out.push(self.directory_mode.tag());
+            out.extend_from_slice(&self.keytrans_suite.suite_id().to_be_bytes());
+        }
         out
     }
 
     /// Parse a policy from its canonical bytes, validating the layout, the enum
-    /// tags, and the v0.1 well-formedness rules.
+    /// tags, and the v0.1 well-formedness rules. Accepts both the v1 (CONIKS)
+    /// and v2 (KEYTRANS-route) layouts; a v1 record reads as the default
+    /// [`DirectoryMode::Coniks`] route.
     ///
     /// # Errors
     /// Returns [`Error::MalformedPolicy`] for an unknown format version, an
@@ -563,7 +824,7 @@ impl NamespacePolicy {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let mut cur = Cursor::new(bytes);
         let format_version = cur.u32()?;
-        if format_version != POLICY_FORMAT_VERSION {
+        if format_version != POLICY_FORMAT_VERSION_V1 && format_version != POLICY_FORMAT_VERSION {
             return Err(Error::MalformedPolicy(format!(
                 "unknown policy format version {format_version}"
             )));
@@ -593,13 +854,21 @@ impl NamespacePolicy {
                 )));
             }
         };
+        // v2 appends the Layer-3 directory axes; v1 records default to CONIKS.
+        let (directory_mode, keytrans_suite) = if format_version == POLICY_FORMAT_VERSION {
+            let directory_mode = DirectoryMode::from_tag(cur.u8()?)?;
+            let keytrans_suite = KeytransSuite::from_id(cur.u16()?)?;
+            (directory_mode, keytrans_suite)
+        } else {
+            (DirectoryMode::Coniks, KeytransSuite::default())
+        };
         if !cur.is_empty() {
             return Err(Error::MalformedPolicy(
                 "trailing bytes after policy record".into(),
             ));
         }
 
-        Self::new(
+        let policy = Self {
             namespace,
             policy_schema_version,
             security_level,
@@ -609,7 +878,11 @@ impl NamespacePolicy {
             effective_from,
             created_at,
             prev_policy_hash,
-        )
+            directory_mode,
+            keytrans_suite,
+        };
+        policy.validate()?;
+        Ok(policy)
     }
 
     /// The intra-chain `policy_hash`: the 64-byte SHA3-512 content hash over the
@@ -719,6 +992,43 @@ impl NamespacePolicy {
                 declared: format!("commitment_hash {:?}", self.commitment_hash),
                 observed: format!("commitment_hash {observed:?}"),
             })
+        }
+    }
+
+    /// Enforce that an **observed** directory backend (the
+    /// [`crate::directory::Directory::backend_id`] that actually served a proof)
+    /// matches this policy's declared route + suite (Slice 9e).
+    ///
+    /// A namespace declaring [`DirectoryMode::Keytrans`] under a given
+    /// [`KeytransSuite`] must be served by exactly that backend
+    /// ([`crate::directory::KEYTRANS_EXP_V04`] for the experimental suite); a
+    /// CONIKS-route namespace must be served by
+    /// [`crate::directory::CONIKS_V1`]. Any disagreement — including a route that
+    /// declares a reserved/not-built suite — is a hard rejection.
+    ///
+    /// # Errors
+    /// Returns [`Error::PostureMismatch`] on any disagreement.
+    pub fn enforce_directory_backend(&self, observed: DirectoryBackendId) -> Result<()> {
+        match self.declared_directory_backend_id() {
+            Some(expected) if expected == observed => Ok(()),
+            expected => Err(Error::PostureMismatch {
+                declared: expected.map_or_else(
+                    || {
+                        format!(
+                            "directory_mode {:?} / keytrans_suite {:?} (no built backend)",
+                            self.directory_mode, self.keytrans_suite
+                        )
+                    },
+                    |e| {
+                        format!(
+                            "directory_mode {:?} (backend 0x{:04x})",
+                            self.directory_mode,
+                            e.as_u16()
+                        )
+                    },
+                ),
+                observed: format!("directory backend 0x{:04x}", observed.as_u16()),
+            }),
         }
     }
 }
@@ -1104,6 +1414,11 @@ impl<'a> Cursor<'a> {
         Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     }
 
+    fn u16(&mut self) -> Result<u16> {
+        let b = self.take(2)?;
+        Ok(u16::from_be_bytes([b[0], b[1]]))
+    }
+
     fn u64(&mut self) -> Result<u64> {
         let b = self.take(8)?;
         Ok(u64::from_be_bytes([
@@ -1359,5 +1674,134 @@ mod tests {
         assert_eq!(chain.active_at(9).unwrap().policy_schema_version(), 1);
         assert_eq!(chain.active_at(10).unwrap().policy_schema_version(), 2);
         assert_eq!(chain.active_at(1000).unwrap().policy_schema_version(), 2);
+    }
+
+    // === Slice 9e: directory axes (DirectoryMode + KeytransSuite) ===
+
+    use crate::directory::{CONIKS_V1, KEYTRANS_EXP_V04};
+
+    fn keytrans_policy(suite: KeytransSuite) -> Result<NamespacePolicy> {
+        NamespacePolicy::new_keytrans(
+            ns(),
+            1,
+            SecurityLevel::Cat5,
+            CheckpointSuite::Hybrid,
+            CommitmentHash::Sha3_512,
+            VrfMode::Classical,
+            0,
+            1_700_000,
+            None,
+            suite,
+        )
+    }
+
+    #[test]
+    fn coniks_default_serializes_as_v1_unchanged() {
+        // The default route is CONIKS, which must emit a v1 record (format
+        // version 1, no appended directory axes) — the backward-compat wall.
+        let p = NamespacePolicy::genesis(ns(), SecurityLevel::Cat3, CheckpointSuite::Hybrid, 0, 0)
+            .unwrap();
+        assert_eq!(p.directory_mode(), DirectoryMode::Coniks);
+        let bytes = p.canonical_bytes();
+        assert_eq!(&bytes[..4], &1u32.to_be_bytes());
+        // Round-trips, and the format byte stays 1.
+        let parsed = NamespacePolicy::parse(&bytes).unwrap();
+        assert_eq!(parsed, p);
+        assert_eq!(parsed.directory_mode(), DirectoryMode::Coniks);
+        assert_eq!(parsed.declared_directory_backend_id(), Some(CONIKS_V1));
+    }
+
+    #[test]
+    fn keytrans_route_round_trips_as_v2() {
+        let p = keytrans_policy(KeytransSuite::MetamorphicHybridExp).unwrap();
+        let bytes = p.canonical_bytes();
+        assert_eq!(&bytes[..4], &2u32.to_be_bytes());
+        let parsed = NamespacePolicy::parse(&bytes).unwrap();
+        assert_eq!(parsed, p);
+        assert_eq!(parsed.directory_mode(), DirectoryMode::Keytrans);
+        assert_eq!(parsed.keytrans_suite(), KeytransSuite::MetamorphicHybridExp);
+        assert_eq!(parsed.canonical_bytes(), bytes);
+        assert_eq!(
+            parsed.declared_directory_backend_id(),
+            Some(KEYTRANS_EXP_V04)
+        );
+    }
+
+    #[test]
+    fn keytrans_reserved_suites_are_rejected() {
+        // Standard suites parse on the wire but are reserved-but-rejected at
+        // validation (mirrors VrfMode::PurePqExperimental).
+        assert!(matches!(
+            keytrans_policy(KeytransSuite::Kt128Sha256Ed25519),
+            Err(Error::MalformedPolicy(_))
+        ));
+        assert!(matches!(
+            keytrans_policy(KeytransSuite::Kt128Sha256P256),
+            Err(Error::MalformedPolicy(_))
+        ));
+        // ...and a forged v2 record carrying a reserved suite is rejected on parse.
+        let mut bytes = keytrans_policy(KeytransSuite::MetamorphicHybridExp)
+            .unwrap()
+            .canonical_bytes();
+        let n = bytes.len();
+        bytes[n - 2..].copy_from_slice(&KeytransSuite::Kt128Sha256P256.suite_id().to_be_bytes());
+        assert!(matches!(
+            NamespacePolicy::parse(&bytes),
+            Err(Error::MalformedPolicy(_))
+        ));
+    }
+
+    #[test]
+    fn enforce_directory_backend_declared_equals_observed() {
+        let coniks =
+            NamespacePolicy::genesis(ns(), SecurityLevel::Cat3, CheckpointSuite::Hybrid, 0, 0)
+                .unwrap();
+        assert!(coniks.enforce_directory_backend(CONIKS_V1).is_ok());
+        assert!(matches!(
+            coniks.enforce_directory_backend(KEYTRANS_EXP_V04),
+            Err(Error::PostureMismatch { .. })
+        ));
+
+        let keytrans = keytrans_policy(KeytransSuite::MetamorphicHybridExp).unwrap();
+        assert!(keytrans.enforce_directory_backend(KEYTRANS_EXP_V04).is_ok());
+        assert!(matches!(
+            keytrans.enforce_directory_backend(CONIKS_V1),
+            Err(Error::PostureMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn v1_parse_defaults_to_coniks_route() {
+        // A hand-built v1 record (no appended axes) reads as the CONIKS route.
+        let p =
+            NamespacePolicy::genesis(ns(), SecurityLevel::Cat5, CheckpointSuite::PureCnsa2, 0, 0)
+                .unwrap();
+        let v1 = p.canonical_bytes();
+        let parsed = NamespacePolicy::parse(&v1).unwrap();
+        assert_eq!(parsed.directory_mode(), DirectoryMode::Coniks);
+        assert_eq!(parsed.keytrans_suite(), KeytransSuite::default());
+    }
+
+    #[test]
+    fn keytrans_route_migrates_and_chains() {
+        // A KEYTRANS-route policy participates in the version chain exactly like
+        // a CONIKS one (the new axes are carried through migration).
+        let g = keytrans_policy(KeytransSuite::MetamorphicHybridExp).unwrap();
+        let mut chain = PolicyChain::genesis(g.clone()).unwrap();
+        let v2 = NamespacePolicy::new_keytrans(
+            ns(),
+            2,
+            SecurityLevel::Cat5,
+            CheckpointSuite::Hybrid,
+            CommitmentHash::Sha3_512,
+            VrfMode::Classical,
+            100,
+            1,
+            Some(g.policy_hash().unwrap()),
+            KeytransSuite::MetamorphicHybridExp,
+        )
+        .unwrap();
+        chain.push(v2).unwrap();
+        assert_eq!(chain.latest().directory_mode(), DirectoryMode::Keytrans);
     }
 }

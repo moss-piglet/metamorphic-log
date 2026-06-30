@@ -125,7 +125,10 @@ pub fn hash_parent(left: &LogNode, right: &LogNode) -> LogNode {
 #[inline]
 fn split_point(n: usize) -> usize {
     debug_assert!(n > 1);
-    let bits = usize::BITS - (n as u64 - 1).leading_zeros();
+    // Compute the bit width against `u64::BITS`, matching the `n as u64` cast:
+    // mixing `usize::BITS` here underflows on 32-bit targets (e.g. wasm32, where
+    // `usize::BITS == 32` but `leading_zeros` is taken on the 64-bit value).
+    let bits = u64::BITS - (n as u64 - 1).leading_zeros();
     1usize << (bits - 1)
 }
 

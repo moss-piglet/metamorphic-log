@@ -336,3 +336,92 @@ fn wasm_coniks_lookup_and_absence_route_through_verifier() {
         .is_err()
     );
 }
+
+// --------------------------------------------------------------------------
+// 6. Experimental KEYTRANS combined-tree directory (KEYTRANS_EXP_04)
+//
+//    VERSION-TAGGED, MOVABLE — explicitly NOT a frozen vector. These bytes move
+//    with `draft-ietf-keytrans-protocol` until Last Call, so this test locks
+//    only Rust↔JS byte-parity of *verification* for the experimental suite
+//    (the prover runs in-wasm, the WASM SDK verifier checks its output). It is
+//    deliberately separate from and does not perturb the frozen
+//    `key_history_v1` / CONIKS / policy-v1 vectors above.
+// --------------------------------------------------------------------------
+
+#[wasm_bindgen_test]
+fn wasm_keytrans_search_fixed_version_and_monitor_verify() {
+    use metamorphic_log::keytrans::{KeytransDirectory, KeytransExt};
+    use metamorphic_log::vrf::Ecvrf;
+    use metamorphic_log::vrf::Vrf;
+
+    const CTX: &str = "metamorphic.app/keytrans-commitment/exp04";
+
+    // Deterministic VRF keypair so the run is reproducible within a draft rev.
+    let vrf = Ecvrf;
+    let (sk, pk) = vrf.generate_keypair();
+    let mut dir = KeytransDirectory::new(CTX, Box::new(Ecvrf), sk, pk.clone());
+    dir.update(b"alice", b"head-v0", 1_000, &[1u8; 32]).unwrap();
+    dir.update(b"alice", b"head-v1", 2_000, &[2u8; 32]).unwrap();
+    dir.update(b"alice", b"head-v2", 3_000, &[3u8; 32]).unwrap();
+    dir.update(b"bob", b"bob-v0", 4_000, &[4u8; 32]).unwrap();
+
+    let root = b64(&dir.combined_root().unwrap());
+    let vrf_pub = b64(pk.as_bytes());
+
+    // Greatest-version search: verify through the WASM SDK byte path.
+    let search = dir.prove_search(b"alice").unwrap();
+    let search_b64 = b64(&search.encode().unwrap());
+    let outcome =
+        keytrans_verify_search(CTX, &vrf_pub, &root, &b64(b"alice"), &search_b64).unwrap();
+    assert!(
+        js_sys::Reflect::get(&outcome, &JsValue::from_str("present"))
+            .unwrap()
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(get_str(&outcome, "valueB64"), b64(b"head-v2"));
+
+    // Absent label.
+    let absent = dir.prove_search(b"carol").unwrap();
+    let absent_b64 = b64(&absent.encode().unwrap());
+    let outcome =
+        keytrans_verify_search(CTX, &vrf_pub, &root, &b64(b"carol"), &absent_b64).unwrap();
+    assert!(
+        !js_sys::Reflect::get(&outcome, &JsValue::from_str("present"))
+            .unwrap()
+            .as_bool()
+            .unwrap()
+    );
+
+    // Fixed-version search.
+    let fv = dir.prove_fixed_version(b"alice", 1).unwrap();
+    let fv_b64 = b64(&fv.encode().unwrap());
+    let outcome =
+        keytrans_verify_fixed_version(CTX, &vrf_pub, &root, &b64(b"alice"), &fv_b64).unwrap();
+    assert_eq!(get_str(&outcome, "valueB64"), b64(b"head-v1"));
+
+    // Monitor proof.
+    let mon = dir.prove_monitor(b"alice", 2).unwrap();
+    let mon_b64 = b64(&mon.encode().unwrap());
+    assert!(keytrans_verify_monitor(CTX, &vrf_pub, &root, &b64(b"alice"), &mon_b64).unwrap());
+
+    // A tampered root is rejected through the WASM byte path.
+    let mut bad = metamorphic_crypto::b64::decode(&root).unwrap();
+    bad[0] ^= 0xFF;
+    assert!(
+        keytrans_verify_search(CTX, &vrf_pub, &b64(&bad), &b64(b"alice"), &search_b64).is_err()
+    );
+}
+
+#[wasm_bindgen_test]
+fn wasm_signed_policy_verify_surfaces_directory_axes() {
+    // The frozen v1 policy KAT is a CONIKS-route record; the SDK now surfaces
+    // the Slice-9e directory axes (default CONIKS / experimental suite) without
+    // changing the frozen v1 bytes.
+    let p = signed_policy_verify(KAT_SIGNED_B64.trim()).unwrap();
+    assert_eq!(get_str(&p, "directoryMode"), "coniks");
+    assert_eq!(get_str(&p, "keytransSuite"), "metamorphicHybridExp");
+    // Declared CONIKS route enforces against the CONIKS backend id (0x0001).
+    assert!(policy_enforce_directory_backend(KAT_SIGNED_B64.trim(), 0x0001).unwrap());
+    assert!(policy_enforce_directory_backend(KAT_SIGNED_B64.trim(), 0xF004).is_err());
+}

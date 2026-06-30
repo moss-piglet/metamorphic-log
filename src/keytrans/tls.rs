@@ -588,6 +588,343 @@ impl PrefixProof {
     }
 }
 
+// ===========================================================================
+// Slice 9e proof wire structs (§11) — top-level search / fixed-version /
+// monitor proofs. Experimental, version-tagged, MOVABLE.
+// ===========================================================================
+//
+// These bytes are the JS-facing / object-safe `directory::SearchProof` encoding
+// for the experimental KEYTRANS backend. They compose the §11.1 InclusionProof
+// and §11.2 PrefixProof structs already above with the head context and the
+// revealed greatest-version value, so a relying party can decode an opaque
+// proof blob and dispatch to `KeytransVerifier`. The wire layout is **not
+// frozen** — it moves with `draft-ietf-keytrans-protocol` like the rest of this
+// backend; the cross-language KAT that locks it is explicitly labelled movable.
+
+use super::ext::{
+    KeytransFixedVersionProof, KeytransMonitorProof, KeytransSearchProof, LadderStep, RevealedValue,
+};
+use crate::vrf::VrfProof;
+
+/// Top-level proof-kind discriminator (the leading byte of an encoded
+/// experimental KEYTRANS `directory::SearchProof`).
+const PROOF_KIND_SEARCH: u8 = 1;
+const PROOF_KIND_FIXED_VERSION: u8 = 2;
+const PROOF_KIND_MONITOR: u8 = 3;
+
+/// Write a `u64` (big-endian).
+fn write_u64(out: &mut Vec<u8>, v: u64) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
+/// Read a fixed `[u8; NH]` node value.
+fn read_nh(r: &mut Reader<'_>, what: &str) -> Result<[u8; NH]> {
+    let b = r.take(NH, what)?;
+    let mut h = [0u8; NH];
+    h.copy_from_slice(b);
+    Ok(h)
+}
+
+/// Encode the shared head context (`entry_index, tree_size, timestamp,
+/// prefix_root, log_inclusion`).
+fn encode_head(
+    out: &mut Vec<u8>,
+    entry_index: u64,
+    tree_size: u64,
+    timestamp: u64,
+    prefix_root: &[u8; NH],
+    log_inclusion: &[[u8; NH]],
+) -> Result<()> {
+    write_u64(out, entry_index);
+    write_u64(out, tree_size);
+    write_u64(out, timestamp);
+    out.extend_from_slice(prefix_root);
+    out.extend_from_slice(&encode_hash_vector(log_inclusion)?);
+    Ok(())
+}
+
+/// The decoded head context.
+struct Head {
+    entry_index: u64,
+    tree_size: u64,
+    timestamp: u64,
+    prefix_root: [u8; NH],
+    log_inclusion: Vec<[u8; NH]>,
+}
+
+fn read_head(r: &mut Reader<'_>) -> Result<Head> {
+    let entry_index = r.u64("Proof.entry_index")?;
+    let tree_size = r.u64("Proof.tree_size")?;
+    let timestamp = r.u64("Proof.timestamp")?;
+    let prefix_root = read_nh(r, "Proof.prefix_root")?;
+    let log_inclusion = read_hash_vector(r, "Proof.log_inclusion")?;
+    Ok(Head {
+        entry_index,
+        tree_size,
+        timestamp,
+        prefix_root,
+        log_inclusion,
+    })
+}
+
+/// Encode one [`LadderStep`]:
+/// `u32 version || vrf_proof<0..2^16-1> || prefix_proof<0..2^16-1> ||
+///  u8 has_commitment || [opaque commitment[COMMITMENT_LEN]]`.
+fn encode_ladder_step(out: &mut Vec<u8>, step: &LadderStep) -> Result<()> {
+    out.extend_from_slice(&step.version.to_be_bytes());
+    write_vec_u16(out, step.vrf_proof.as_bytes(), "LadderStep.vrf_proof")?;
+    write_vec_u16(out, &step.prefix_proof.encode()?, "LadderStep.prefix_proof")?;
+    match &step.commitment {
+        Some(c) => {
+            out.push(1);
+            out.extend_from_slice(c.as_bytes());
+        }
+        None => out.push(0),
+    }
+    Ok(())
+}
+
+fn read_ladder_step(r: &mut Reader<'_>) -> Result<LadderStep> {
+    let version = r.u32("LadderStep.version")?;
+    let vrf_proof = VrfProof::from_bytes(r.vec_u16("LadderStep.vrf_proof")?);
+    let prefix_proof = PrefixProof::decode(&r.vec_u16("LadderStep.prefix_proof")?)?;
+    let has_commitment = r.u8("LadderStep.has_commitment")?;
+    let commitment = match has_commitment {
+        0 => None,
+        1 => {
+            let bytes: [u8; COMMITMENT_LEN] = r
+                .take(COMMITMENT_LEN, "LadderStep.commitment")?
+                .try_into()
+                .expect("take returned COMMITMENT_LEN bytes");
+            Some(Commitment::from_bytes(bytes))
+        }
+        other => {
+            return Err(Error::MalformedKeytrans(format!(
+                "LadderStep.has_commitment must be 0 or 1, got {other}"
+            )));
+        }
+    };
+    Ok(LadderStep {
+        version,
+        vrf_proof,
+        prefix_proof,
+        commitment,
+    })
+}
+
+/// Encode a ladder as `u16 count || count * LadderStep`.
+fn encode_ladder(out: &mut Vec<u8>, ladder: &[LadderStep]) -> Result<()> {
+    let count = u16::try_from(ladder.len()).map_err(|_| {
+        Error::MalformedKeytrans(format!("ladder of {} rungs exceeds 65535", ladder.len()))
+    })?;
+    out.extend_from_slice(&count.to_be_bytes());
+    for step in ladder {
+        encode_ladder_step(out, step)?;
+    }
+    Ok(())
+}
+
+fn read_ladder(r: &mut Reader<'_>) -> Result<Vec<LadderStep>> {
+    let count = r.u16("Ladder.count")? as usize;
+    let mut ladder = Vec::with_capacity(count);
+    for _ in 0..count {
+        ladder.push(read_ladder_step(r)?);
+    }
+    Ok(ladder)
+}
+
+/// Encode an optional revealed value: `u8 present || [value<0..2^32-1> ||
+/// opening<0..2^8-1>]`.
+fn encode_revealed(out: &mut Vec<u8>, revealed: &Option<RevealedValue>) -> Result<()> {
+    match revealed {
+        Some(r) => {
+            out.push(1);
+            write_vec_u32(out, &r.value, "RevealedValue.value")?;
+            write_vec_u8(out, &r.opening, "RevealedValue.opening")?;
+        }
+        None => out.push(0),
+    }
+    Ok(())
+}
+
+fn read_revealed(r: &mut Reader<'_>) -> Result<Option<RevealedValue>> {
+    match r.u8("RevealedValue.present")? {
+        0 => Ok(None),
+        1 => {
+            let value = r.vec_u32("RevealedValue.value")?;
+            let opening = r.vec_u8("RevealedValue.opening")?;
+            Ok(Some(RevealedValue { value, opening }))
+        }
+        other => Err(Error::MalformedKeytrans(format!(
+            "RevealedValue.present must be 0 or 1, got {other}"
+        ))),
+    }
+}
+
+/// Encode an optional `u32` greatest version: `u8 present || [u32 version]`.
+fn encode_opt_u32(out: &mut Vec<u8>, v: Option<u32>) {
+    match v {
+        Some(v) => {
+            out.push(1);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+        None => out.push(0),
+    }
+}
+
+fn read_opt_u32(r: &mut Reader<'_>, what: &str) -> Result<Option<u32>> {
+    match r.u8(what)? {
+        0 => Ok(None),
+        1 => Ok(Some(r.u32(what)?)),
+        other => Err(Error::MalformedKeytrans(format!(
+            "{what}.present must be 0 or 1, got {other}"
+        ))),
+    }
+}
+
+/// Serialize a greatest-version search proof (§6) to a self-describing
+/// experimental `directory::SearchProof` byte blob (leading
+/// [`PROOF_KIND_SEARCH`] tag).
+///
+/// # Errors
+/// [`Error::MalformedKeytrans`] if any embedded vector exceeds its bound.
+pub fn encode_search_proof(proof: &KeytransSearchProof) -> Result<Vec<u8>> {
+    let mut out = vec![PROOF_KIND_SEARCH];
+    encode_head(
+        &mut out,
+        proof.entry_index,
+        proof.tree_size,
+        proof.timestamp,
+        &proof.prefix_root,
+        &proof.log_inclusion,
+    )?;
+    encode_opt_u32(&mut out, proof.greatest_version);
+    encode_ladder(&mut out, &proof.ladder)?;
+    encode_revealed(&mut out, &proof.revealed)?;
+    Ok(out)
+}
+
+/// Parse a greatest-version search proof from its byte blob, requiring the
+/// [`PROOF_KIND_SEARCH`] tag.
+///
+/// # Errors
+/// [`Error::MalformedKeytrans`] on a wrong tag, an overrunning length header, or
+/// trailing bytes.
+pub fn decode_search_proof(bytes: &[u8]) -> Result<KeytransSearchProof> {
+    let mut r = Reader::new(bytes);
+    expect_kind(&mut r, PROOF_KIND_SEARCH, "search")?;
+    let head = read_head(&mut r)?;
+    let greatest_version = read_opt_u32(&mut r, "SearchProof.greatest_version")?;
+    let ladder = read_ladder(&mut r)?;
+    let revealed = read_revealed(&mut r)?;
+    r.finish("KeytransSearchProof")?;
+    Ok(KeytransSearchProof {
+        entry_index: head.entry_index,
+        tree_size: head.tree_size,
+        timestamp: head.timestamp,
+        prefix_root: head.prefix_root,
+        log_inclusion: head.log_inclusion,
+        greatest_version,
+        ladder,
+        revealed,
+    })
+}
+
+/// Serialize a fixed-version search proof (§7) to its byte blob.
+///
+/// # Errors
+/// [`Error::MalformedKeytrans`] if any embedded vector exceeds its bound.
+pub fn encode_fixed_version_proof(proof: &KeytransFixedVersionProof) -> Result<Vec<u8>> {
+    let mut out = vec![PROOF_KIND_FIXED_VERSION];
+    encode_head(
+        &mut out,
+        proof.entry_index,
+        proof.tree_size,
+        proof.timestamp,
+        &proof.prefix_root,
+        &proof.log_inclusion,
+    )?;
+    encode_ladder_step(&mut out, &proof.step)?;
+    encode_revealed(&mut out, &proof.revealed)?;
+    Ok(out)
+}
+
+/// Parse a fixed-version search proof from its byte blob.
+///
+/// # Errors
+/// [`Error::MalformedKeytrans`] on a wrong tag, an overrunning header, or
+/// trailing bytes.
+pub fn decode_fixed_version_proof(bytes: &[u8]) -> Result<KeytransFixedVersionProof> {
+    let mut r = Reader::new(bytes);
+    expect_kind(&mut r, PROOF_KIND_FIXED_VERSION, "fixed-version")?;
+    let head = read_head(&mut r)?;
+    let step = read_ladder_step(&mut r)?;
+    let revealed = read_revealed(&mut r)?;
+    r.finish("KeytransFixedVersionProof")?;
+    Ok(KeytransFixedVersionProof {
+        entry_index: head.entry_index,
+        tree_size: head.tree_size,
+        timestamp: head.timestamp,
+        prefix_root: head.prefix_root,
+        log_inclusion: head.log_inclusion,
+        step,
+        revealed,
+    })
+}
+
+/// Serialize a monitoring proof (§8) to its byte blob.
+///
+/// # Errors
+/// [`Error::MalformedKeytrans`] if any embedded vector exceeds its bound.
+pub fn encode_monitor_proof(proof: &KeytransMonitorProof) -> Result<Vec<u8>> {
+    let mut out = vec![PROOF_KIND_MONITOR];
+    encode_head(
+        &mut out,
+        proof.entry_index,
+        proof.tree_size,
+        proof.timestamp,
+        &proof.prefix_root,
+        &proof.log_inclusion,
+    )?;
+    out.extend_from_slice(&proof.version.to_be_bytes());
+    encode_ladder(&mut out, &proof.ladder)?;
+    Ok(out)
+}
+
+/// Parse a monitoring proof from its byte blob.
+///
+/// # Errors
+/// [`Error::MalformedKeytrans`] on a wrong tag, an overrunning header, or
+/// trailing bytes.
+pub fn decode_monitor_proof(bytes: &[u8]) -> Result<KeytransMonitorProof> {
+    let mut r = Reader::new(bytes);
+    expect_kind(&mut r, PROOF_KIND_MONITOR, "monitor")?;
+    let head = read_head(&mut r)?;
+    let version = r.u32("MonitorProof.version")?;
+    let ladder = read_ladder(&mut r)?;
+    r.finish("KeytransMonitorProof")?;
+    Ok(KeytransMonitorProof {
+        entry_index: head.entry_index,
+        tree_size: head.tree_size,
+        timestamp: head.timestamp,
+        prefix_root: head.prefix_root,
+        log_inclusion: head.log_inclusion,
+        version,
+        ladder,
+    })
+}
+
+fn expect_kind(r: &mut Reader<'_>, want: u8, what: &str) -> Result<()> {
+    let got = r.u8("Proof.kind")?;
+    if got == want {
+        Ok(())
+    } else {
+        Err(Error::MalformedKeytrans(format!(
+            "expected {what} proof (kind {want}), got kind {got}"
+        )))
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
