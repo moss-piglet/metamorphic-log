@@ -6,6 +6,69 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-06-30
+
+Slice 9 of EPIC #325 — makes the experimental **IETF KEYTRANS** directory
+backend **on-spec**: the two standardized `draft-ietf-keytrans-protocol-04`
+§15.1 cipher suites now *work*, rather than being present-but-rejected. A
+namespace that chooses KEYTRANS for standards conformance gets the standardized
+HMAC-SHA256 / P-256 construction. Everything KEYTRANS remains
+`KEYTRANS_EXP_04`-tagged and **movable** (its wire bytes track the draft until
+Last Call); the classical VRFs provide index privacy only and are not
+FIPS-validated. **No frozen KATs change** — the CONIKS, policy-v1,
+`key_history_v1`, and RFC 6962 tlog conformance vectors are byte-for-byte
+unchanged, and a default CONIKS-route policy still serializes as a v1 record.
+
+### Added
+
+- **On-spec IETF standard KEYTRANS suites (§15.1).** `KT_128_SHA256_P256`
+  (`0x0001`) and `KT_128_SHA256_Ed25519` (`0x0002`) are now built and legal
+  (previously reserved-but-rejected through 0.1.3):
+  - `keytrans::KtSuite` — the directory-core suite descriptor that
+    suite-dispatches the commitment construction, opening length (`Nc`),
+    commitment-tag width, and VRF. Exposes `suite_id`, `from_suite_id`,
+    `opening_len`, `commitment_len`, `vrf`, and `commit`.
+  - Commitment (§10.6): the standard suites compute
+    `HMAC-SHA256(Kc, CommitmentValue::encode())` via
+    `metamorphic_crypto::hmac_sha256`, with the fixed §15.1 key `Kc`
+    (`keytrans::KC`, the literal 16 bytes `d821f8790d97709796b4d7903357c3f5`)
+    and `Nc = 16` (`keytrans::NC_STANDARD`), yielding a 32-byte tag. The private
+    `MetamorphicHybridExp` suite keeps its 64-byte SHA3-512 commitment
+    (the post-quantum trade-off) and remains the default.
+  - `vrf::EcvrfP256` — a `Vrf` adapter over
+    `metamorphic_crypto::vrf_p256` (ECVRF-P256-SHA256-TAI, RFC 9381 suite
+    `0x01`). Its 32-byte output is the prefix-tree search key verbatim (no
+    truncation); `KT_128_SHA256_Ed25519` reuses `vrf::Ecvrf` truncated to 32
+    bytes.
+  - `keytrans::KtCommitment` — a variable-width commitment tag (32 or 64 bytes)
+    so the on-spec HMAC tag and the private SHA3-512 tag share one prefix-tree /
+    proof code path.
+  - `KeytransDirectory::new_with_suite` / `KeytransVerifier::new_with_suite`
+    select a suite (the existing `new` constructors default to the private
+    experimental suite, unchanged). The proof decoders
+    (`KeytransSearchProof::decode` et al.) take the suite's `commitment_len`.
+  - `policy::KeytransSuite::{Kt128Sha256P256, Kt128Sha256Ed25519}` are legal on
+    the `Keytrans` route; `is_built()` / `backend_id()` /
+    `declared_directory_backend_id()` report them served under the combined-tree
+    backend `KEYTRANS_EXP_V04` (the suite is distinguished by its §15.1 id).
+  - WASM SDK: `keytransVerifySearchSuite` / `keytransVerifyFixedVersionSuite` /
+    `keytransVerifyMonitorSuite` take a §15.1 `suiteId`, verifying the standard
+    suites in the browser identically to native. The existing 5-argument
+    functions still default to the private experimental suite.
+- **Movable standard-suite KATs.** Fixed HMAC-SHA256 commitment vectors and
+  prover→verifier round-trip vectors (search / fixed-version / monitor) for both
+  standard suites. Tagged `KEYTRANS_EXP_04` / movable — kept out of the frozen
+  conformance and cross-language suites.
+
+### Changed
+
+- Bumped `metamorphic-crypto` to `0.9.0` (adds `hmac_sha256` and the
+  `vrf_p256` ECVRF-P256-SHA256-TAI primitive; consumed from crates.io, no patch
+  or path dependency).
+- Documentation across `lib.rs`, `policy::KeytransSuite`, and the `keytrans`
+  module now describes the standard suites as legal-experimental (still
+  movable), replacing the earlier "reserved but rejected" framing.
+
 ## [0.1.3] - 2026-06-28
 
 Slice 8 of EPIC #325 — the **first post-v0.1 anchoring slice**. Adds
@@ -319,7 +382,8 @@ changelog entry.
   `wasm32-unknown-unknown` check, `rustsec/audit-check`, MSRV-1.85 floor build),
   with all third-party action refs SHA-pinned; Dependabot and FUNDING config.
 
-[Unreleased]: https://github.com/moss-piglet/metamorphic-log/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/moss-piglet/metamorphic-log/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.4
 [0.1.3]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.3
 [0.1.2]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.2
 [0.1.1]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.1

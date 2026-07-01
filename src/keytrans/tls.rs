@@ -405,8 +405,9 @@ impl LogEntry {
 // Slice 9d proof wire structs (§11.1 / §11.2) — experimental, MOVABLE.
 // ===========================================================================
 
-use super::prefix_tree::{PrefixLeaf, PrefixProof, PrefixSearchResultType, SEARCH_KEY_LEN};
-use crate::commitment::{COMMITMENT_LEN, Commitment};
+use super::prefix_tree::{
+    KtCommitment, PrefixLeaf, PrefixProof, PrefixSearchResultType, SEARCH_KEY_LEN,
+};
 
 /// `PrefixSearchResultType` (§11.2) wire codes.
 const PREFIX_RESULT_INCLUSION: u8 = 1;
@@ -503,9 +504,10 @@ impl PrefixProof {
     /// Serialize a single-key prefix-tree proof to canonical TLS-PL bytes
     /// (§11.2 `PrefixProof`, with a one-element `results` array).
     ///
-    /// The experimental private suite carries the full 64-byte
-    /// [`crate::commitment`] in a `nonInclusionLeaf` leaf rather than the spec's
-    /// 32-byte `Hash.Nh` commitment — a documented, version-tagged deviation.
+    /// A `nonInclusionLeaf` carries the active suite's [`KtCommitment`] tag
+    /// (32 bytes for the standard HMAC suites; 64 bytes for the experimental
+    /// SHA3-512 suite — a documented, version-tagged deviation from the spec's
+    /// 32-byte `Hash.Nh` commitment).
     ///
     /// # Errors
     /// [`Error::MalformedKeytrans`] if the result/copath sizes exceed their
@@ -535,13 +537,16 @@ impl PrefixProof {
         Ok(out)
     }
 
-    /// Parse a single-key prefix-tree proof from canonical TLS-PL bytes.
+    /// Parse a single-key prefix-tree proof from canonical TLS-PL bytes, given
+    /// the active suite's `commitment_len` (the width of a `nonInclusionLeaf`
+    /// commitment tag: 32 for the standard HMAC suites, 64 for the experimental
+    /// SHA3-512 suite).
     ///
     /// # Errors
     /// [`Error::MalformedKeytrans`] on an unknown result type, a `results` array
     /// that is not exactly one entry, a malformed length header, or trailing
     /// bytes.
-    pub fn decode(bytes: &[u8]) -> Result<Self> {
+    pub fn decode(bytes: &[u8], commitment_len: usize) -> Result<Self> {
         let mut r = Reader::new(bytes);
         let results = r.vec_u8("PrefixProof.results")?;
         let mut rr = Reader::new(&results);
@@ -556,15 +561,12 @@ impl PrefixProof {
                     .take(SEARCH_KEY_LEN, "PrefixLeaf.vrf_output")?
                     .try_into()
                     .expect("take returned SEARCH_KEY_LEN bytes");
-                let commitment: [u8; COMMITMENT_LEN] = rr
-                    .take(COMMITMENT_LEN, "PrefixLeaf.commitment")?
-                    .try_into()
-                    .expect("take returned COMMITMENT_LEN bytes");
+                let commitment = rr.take(commitment_len, "PrefixLeaf.commitment")?.to_vec();
                 (
                     PrefixSearchResultType::NonInclusionLeaf,
                     Some(PrefixLeaf {
                         vrf_output,
-                        commitment: Commitment::from_bytes(commitment),
+                        commitment: KtCommitment::from_bytes(commitment),
                     }),
                 )
             }
@@ -669,7 +671,8 @@ fn read_head(r: &mut Reader<'_>) -> Result<Head> {
 
 /// Encode one [`LadderStep`]:
 /// `u32 version || vrf_proof<0..2^16-1> || prefix_proof<0..2^16-1> ||
-///  u8 has_commitment || [opaque commitment[COMMITMENT_LEN]]`.
+///  u8 has_commitment || [opaque commitment[commitment_len]]`
+/// (the commitment width is the active suite's tag size: 32 or 64 bytes).
 fn encode_ladder_step(out: &mut Vec<u8>, step: &LadderStep) -> Result<()> {
     out.extend_from_slice(&step.version.to_be_bytes());
     write_vec_u16(out, step.vrf_proof.as_bytes(), "LadderStep.vrf_proof")?;
@@ -684,19 +687,16 @@ fn encode_ladder_step(out: &mut Vec<u8>, step: &LadderStep) -> Result<()> {
     Ok(())
 }
 
-fn read_ladder_step(r: &mut Reader<'_>) -> Result<LadderStep> {
+fn read_ladder_step(r: &mut Reader<'_>, commitment_len: usize) -> Result<LadderStep> {
     let version = r.u32("LadderStep.version")?;
     let vrf_proof = VrfProof::from_bytes(r.vec_u16("LadderStep.vrf_proof")?);
-    let prefix_proof = PrefixProof::decode(&r.vec_u16("LadderStep.prefix_proof")?)?;
+    let prefix_proof = PrefixProof::decode(&r.vec_u16("LadderStep.prefix_proof")?, commitment_len)?;
     let has_commitment = r.u8("LadderStep.has_commitment")?;
     let commitment = match has_commitment {
         0 => None,
         1 => {
-            let bytes: [u8; COMMITMENT_LEN] = r
-                .take(COMMITMENT_LEN, "LadderStep.commitment")?
-                .try_into()
-                .expect("take returned COMMITMENT_LEN bytes");
-            Some(Commitment::from_bytes(bytes))
+            let bytes = r.take(commitment_len, "LadderStep.commitment")?.to_vec();
+            Some(KtCommitment::from_bytes(bytes))
         }
         other => {
             return Err(Error::MalformedKeytrans(format!(
@@ -724,11 +724,11 @@ fn encode_ladder(out: &mut Vec<u8>, ladder: &[LadderStep]) -> Result<()> {
     Ok(())
 }
 
-fn read_ladder(r: &mut Reader<'_>) -> Result<Vec<LadderStep>> {
+fn read_ladder(r: &mut Reader<'_>, commitment_len: usize) -> Result<Vec<LadderStep>> {
     let count = r.u16("Ladder.count")? as usize;
     let mut ladder = Vec::with_capacity(count);
     for _ in 0..count {
-        ladder.push(read_ladder_step(r)?);
+        ladder.push(read_ladder_step(r, commitment_len)?);
     }
     Ok(ladder)
 }
@@ -810,12 +810,12 @@ pub fn encode_search_proof(proof: &KeytransSearchProof) -> Result<Vec<u8>> {
 /// # Errors
 /// [`Error::MalformedKeytrans`] on a wrong tag, an overrunning length header, or
 /// trailing bytes.
-pub fn decode_search_proof(bytes: &[u8]) -> Result<KeytransSearchProof> {
+pub fn decode_search_proof(bytes: &[u8], commitment_len: usize) -> Result<KeytransSearchProof> {
     let mut r = Reader::new(bytes);
     expect_kind(&mut r, PROOF_KIND_SEARCH, "search")?;
     let head = read_head(&mut r)?;
     let greatest_version = read_opt_u32(&mut r, "SearchProof.greatest_version")?;
-    let ladder = read_ladder(&mut r)?;
+    let ladder = read_ladder(&mut r, commitment_len)?;
     let revealed = read_revealed(&mut r)?;
     r.finish("KeytransSearchProof")?;
     Ok(KeytransSearchProof {
@@ -854,11 +854,14 @@ pub fn encode_fixed_version_proof(proof: &KeytransFixedVersionProof) -> Result<V
 /// # Errors
 /// [`Error::MalformedKeytrans`] on a wrong tag, an overrunning header, or
 /// trailing bytes.
-pub fn decode_fixed_version_proof(bytes: &[u8]) -> Result<KeytransFixedVersionProof> {
+pub fn decode_fixed_version_proof(
+    bytes: &[u8],
+    commitment_len: usize,
+) -> Result<KeytransFixedVersionProof> {
     let mut r = Reader::new(bytes);
     expect_kind(&mut r, PROOF_KIND_FIXED_VERSION, "fixed-version")?;
     let head = read_head(&mut r)?;
-    let step = read_ladder_step(&mut r)?;
+    let step = read_ladder_step(&mut r, commitment_len)?;
     let revealed = read_revealed(&mut r)?;
     r.finish("KeytransFixedVersionProof")?;
     Ok(KeytransFixedVersionProof {
@@ -896,12 +899,12 @@ pub fn encode_monitor_proof(proof: &KeytransMonitorProof) -> Result<Vec<u8>> {
 /// # Errors
 /// [`Error::MalformedKeytrans`] on a wrong tag, an overrunning header, or
 /// trailing bytes.
-pub fn decode_monitor_proof(bytes: &[u8]) -> Result<KeytransMonitorProof> {
+pub fn decode_monitor_proof(bytes: &[u8], commitment_len: usize) -> Result<KeytransMonitorProof> {
     let mut r = Reader::new(bytes);
     expect_kind(&mut r, PROOF_KIND_MONITOR, "monitor")?;
     let head = read_head(&mut r)?;
     let version = r.u32("MonitorProof.version")?;
-    let ladder = read_ladder(&mut r)?;
+    let ladder = read_ladder(&mut r, commitment_len)?;
     r.finish("KeytransMonitorProof")?;
     Ok(KeytransMonitorProof {
         entry_index: head.entry_index,
@@ -1077,7 +1080,12 @@ mod tests {
 
     #[test]
     fn prefix_proof_round_trips_all_result_types() {
-        use super::super::prefix_tree::{PrefixLeaf, PrefixProof, PrefixSearchResultType};
+        use super::super::prefix_tree::{
+            KtCommitment, PrefixLeaf, PrefixProof, PrefixSearchResultType,
+        };
+
+        // The experimental SHA3-512 suite (64-byte commitment tag).
+        const EXP_COMMITMENT_LEN: usize = 64;
 
         let inclusion = PrefixProof {
             result_type: PrefixSearchResultType::Inclusion,
@@ -1086,7 +1094,10 @@ mod tests {
             copath: vec![[0xAA; NH], [0xBB; NH]],
         };
         let bytes = inclusion.encode().unwrap();
-        assert_eq!(PrefixProof::decode(&bytes).unwrap(), inclusion);
+        assert_eq!(
+            PrefixProof::decode(&bytes, EXP_COMMITMENT_LEN).unwrap(),
+            inclusion
+        );
 
         let parent = PrefixProof {
             result_type: PrefixSearchResultType::NonInclusionParent,
@@ -1095,19 +1106,29 @@ mod tests {
             copath: vec![[0xCC; NH], [0xDD; NH]],
         };
         let bytes = parent.encode().unwrap();
-        assert_eq!(PrefixProof::decode(&bytes).unwrap(), parent);
+        assert_eq!(
+            PrefixProof::decode(&bytes, EXP_COMMITMENT_LEN).unwrap(),
+            parent
+        );
 
-        let non_incl_leaf = PrefixProof {
-            result_type: PrefixSearchResultType::NonInclusionLeaf,
-            leaf: Some(PrefixLeaf {
-                vrf_output: [0x5A; SEARCH_KEY_LEN],
-                commitment: Commitment::from_bytes([0x6B; COMMITMENT_LEN]),
-            }),
-            depth: 3,
-            copath: vec![[0x01; NH], [0x02; NH], [0x03; NH]],
-        };
-        let bytes = non_incl_leaf.encode().unwrap();
-        assert_eq!(PrefixProof::decode(&bytes).unwrap(), non_incl_leaf);
+        // A 64-byte (experimental) and a 32-byte (standard HMAC) nonInclusionLeaf
+        // both round-trip when decoded at the matching width.
+        for commitment_len in [EXP_COMMITMENT_LEN, 32usize] {
+            let non_incl_leaf = PrefixProof {
+                result_type: PrefixSearchResultType::NonInclusionLeaf,
+                leaf: Some(PrefixLeaf {
+                    vrf_output: [0x5A; SEARCH_KEY_LEN],
+                    commitment: KtCommitment::from_bytes(vec![0x6B; commitment_len]),
+                }),
+                depth: 3,
+                copath: vec![[0x01; NH], [0x02; NH], [0x03; NH]],
+            };
+            let bytes = non_incl_leaf.encode().unwrap();
+            assert_eq!(
+                PrefixProof::decode(&bytes, commitment_len).unwrap(),
+                non_incl_leaf
+            );
+        }
     }
 
     #[test]
@@ -1115,7 +1136,7 @@ mod tests {
         use super::super::prefix_tree::{PrefixProof, PrefixSearchResultType};
         // results = [0xFF, depth=0]; unknown result type 0xFF.
         let bytes = vec![0x02, 0xFF, 0x00, 0x00, 0x00];
-        assert!(PrefixProof::decode(&bytes).is_err());
+        assert!(PrefixProof::decode(&bytes, 64).is_err());
 
         // Trailing byte after a well-formed inclusion proof is rejected.
         let p = PrefixProof {
@@ -1126,6 +1147,6 @@ mod tests {
         };
         let mut bytes = p.encode().unwrap();
         bytes.push(0xAB);
-        assert!(PrefixProof::decode(&bytes).is_err());
+        assert!(PrefixProof::decode(&bytes, 64).is_err());
     }
 }

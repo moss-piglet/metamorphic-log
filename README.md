@@ -140,7 +140,10 @@ It does **not** solve:
 - **RFC 6962** / **RFC 9162** — Merkle log; inclusion + consistency proofs
 - **C2SP** [`tlog-tiles`][tlog-tiles], `tlog-witness`, `checkpoint` /
   `signed-note` — interoperable substrate enabling reciprocal witnessing
-- **RFC 9381** — ECVRF-edwards25519 (CONIKS index privacy)
+- **RFC 9381** — ECVRF-edwards25519 (`0x03`) and ECVRF-P256 (`0x01`) —
+  index-privacy VRFs
+- **`draft-ietf-keytrans-protocol`** — experimental IETF KEYTRANS combined-tree
+  directory (`keytrans`, `KEYTRANS_EXP_04` — movable, not byte-frozen)
 - **FIPS 203 / 204** + **CNSA 2.0** — post-quantum primitives (via
   [`metamorphic-crypto`][crypto])
 - **NIST SP 800-56C / 800-108** — KDF roles
@@ -153,9 +156,11 @@ It does **not** solve:
 | `merkle`     | 1     | RFC 6962 SHA-256 tree-node hashing (fixed, witness-audited) |
 | `proof`      | 1     | Inclusion + consistency proof verification                  |
 | `checkpoint` | 2     | Signed-note / witnessed checkpoints; hybrid PQ signing      |
-| `vrf`        | 3     | Swappable VRF trait; classical ECVRF (RFC 9381 TAI) default |
+| `vrf`        | 3     | Swappable VRF trait; ECVRF-Ed25519 (default) + ECVRF-P256   |
 | `commitment` | 3     | SHA3-512 hiding/binding index→value commitments             |
 | `coniks`     | 3     | Per-namespace directory; presence + absence (index privacy) |
+| `keytrans`   | 3     | Experimental IETF KEYTRANS combined-tree directory (movable)|
+| `anchor`     | —     | Backend-agnostic checkpoint anchoring/attestation records   |
 | `policy`     | 0     | Signed, versioned namespace policy; declared == observed    |
 | `note`       | 2     | C2SP `signed-note` parse/verify (Ed25519 + hybrid PQ lines) |
 | `tile`       | 2     | C2SP `tlog-tiles` coordinates / serving geometry            |

@@ -33,7 +33,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::commitment::Commitment;
 use crate::directory::{
     Directory, DirectoryBackendId, DirectoryRoot, DirectoryVerifier, KEYTRANS_EXP_V04,
     SearchOutcome, SearchProof, SearchResult,
@@ -42,10 +41,8 @@ use crate::error::{Error, Result};
 use crate::vrf::{Vrf, VrfProof, VrfPublicKey, VrfSecretKey};
 
 use super::ladder::base_binary_ladder;
-use super::prefix_tree::{self, PrefixProof, PrefixSearchResultType, SEARCH_KEY_LEN};
-use super::{
-    CombinedTree, NC, NH, PrefixTree, commit_update, log_entry_hash, log_tree, search_key, tls,
-};
+use super::prefix_tree::{self, KtCommitment, PrefixProof, PrefixSearchResultType, SEARCH_KEY_LEN};
+use super::{CombinedTree, KtSuite, NH, PrefixTree, log_entry_hash, log_tree, search_key, tls};
 
 /// One rung of a binary ladder: a `(label, version)` lookup and its proof.
 ///
@@ -63,7 +60,7 @@ pub struct LadderStep {
     pub prefix_proof: PrefixProof,
     /// The commitment stored at the search key (present iff the rung is an
     /// inclusion proof).
-    pub commitment: Option<Commitment>,
+    pub commitment: Option<KtCommitment>,
 }
 
 /// A greatest-version search proof (§6) against the current log head.
@@ -151,8 +148,8 @@ impl KeytransSearchProof {
     ///
     /// # Errors
     /// [`Error::MalformedKeytrans`] on a malformed blob.
-    pub fn decode(bytes: &[u8]) -> Result<Self> {
-        tls::decode_search_proof(bytes)
+    pub fn decode(bytes: &[u8], commitment_len: usize) -> Result<Self> {
+        tls::decode_search_proof(bytes, commitment_len)
     }
 }
 
@@ -169,8 +166,8 @@ impl KeytransFixedVersionProof {
     ///
     /// # Errors
     /// [`Error::MalformedKeytrans`] on a malformed blob.
-    pub fn decode(bytes: &[u8]) -> Result<Self> {
-        tls::decode_fixed_version_proof(bytes)
+    pub fn decode(bytes: &[u8], commitment_len: usize) -> Result<Self> {
+        tls::decode_fixed_version_proof(bytes, commitment_len)
     }
 }
 
@@ -187,8 +184,8 @@ impl KeytransMonitorProof {
     ///
     /// # Errors
     /// [`Error::MalformedKeytrans`] on a malformed blob.
-    pub fn decode(bytes: &[u8]) -> Result<Self> {
-        tls::decode_monitor_proof(bytes)
+    pub fn decode(bytes: &[u8], commitment_len: usize) -> Result<Self> {
+        tls::decode_monitor_proof(bytes, commitment_len)
     }
 }
 
@@ -201,9 +198,9 @@ struct LabelState {
 /// One stored version of a label: its commitment, value, and opening.
 #[derive(Clone, Debug)]
 struct VersionData {
-    commitment: Commitment,
+    commitment: KtCommitment,
     value: Vec<u8>,
-    opening: [u8; NC],
+    opening: Vec<u8>,
 }
 
 /// The current log-head context shared by every proof builder.
@@ -224,6 +221,7 @@ struct HeadContext {
 /// new version.
 pub struct KeytransDirectory {
     context: String,
+    suite: KtSuite,
     vrf: Box<dyn Vrf>,
     vrf_secret: VrfSecretKey,
     vrf_public: VrfPublicKey,
@@ -235,7 +233,12 @@ pub struct KeytransDirectory {
 
 impl KeytransDirectory {
     /// Create an empty directory committing under `context`, using `vrf` and the
-    /// keypair `(vrf_secret, vrf_public)`.
+    /// keypair `(vrf_secret, vrf_public)`, on the default experimental
+    /// [`KtSuite::MetamorphicHybridExp`] suite.
+    ///
+    /// For an on-spec IETF standard suite, use
+    /// [`KeytransDirectory::new_with_suite`] and pass the suite's matching VRF
+    /// ([`KtSuite::vrf`]).
     #[must_use]
     pub fn new(
         context: impl Into<String>,
@@ -243,8 +246,29 @@ impl KeytransDirectory {
         vrf_secret: VrfSecretKey,
         vrf_public: VrfPublicKey,
     ) -> Self {
+        Self::new_with_suite(
+            context,
+            KtSuite::MetamorphicHybridExp,
+            vrf,
+            vrf_secret,
+            vrf_public,
+        )
+    }
+
+    /// Create an empty directory on an explicit [`KtSuite`]. `vrf` must be the
+    /// suite's VRF (see [`KtSuite::vrf`]) and `(vrf_secret, vrf_public)` a
+    /// matching keypair.
+    #[must_use]
+    pub fn new_with_suite(
+        context: impl Into<String>,
+        suite: KtSuite,
+        vrf: Box<dyn Vrf>,
+        vrf_secret: VrfSecretKey,
+        vrf_public: VrfPublicKey,
+    ) -> Self {
         Self {
             context: context.into(),
+            suite,
             vrf,
             vrf_secret,
             vrf_public,
@@ -253,6 +277,12 @@ impl KeytransDirectory {
             combined: CombinedTree::new(),
             labels: BTreeMap::new(),
         }
+    }
+
+    /// The cipher suite this directory serves.
+    #[must_use]
+    pub fn suite(&self) -> KtSuite {
+        self.suite
     }
 
     /// The relying-party public key for proofs this directory produces.
@@ -275,12 +305,13 @@ impl KeytransDirectory {
     }
 
     /// Append a new version of `label` with `value`, published at `timestamp`
-    /// (milliseconds since the Unix epoch) and blinded by `opening` ([`NC`]
-    /// bytes). Returns the new zero-based version number.
+    /// (milliseconds since the Unix epoch) and blinded by `opening` (the suite's
+    /// [`KtSuite::opening_len`] `Nc` bytes). Returns the new zero-based version
+    /// number.
     ///
     /// # Errors
-    /// [`Error::MalformedKeytrans`] if `opening` is not [`NC`] bytes, the VRF
-    /// fails, or the commitment inputs exceed their TLS-PL bounds.
+    /// [`Error::MalformedKeytrans`] if `opening` is not the suite's `Nc` bytes,
+    /// the VRF fails, or the commitment inputs exceed their TLS-PL bounds.
     pub fn update(
         &mut self,
         label: &[u8],
@@ -288,15 +319,21 @@ impl KeytransDirectory {
         timestamp: u64,
         opening: &[u8],
     ) -> Result<u32> {
-        let opening: [u8; NC] = opening.try_into().map_err(|_| {
-            Error::MalformedKeytrans(format!("commitment opening must be {NC} bytes"))
-        })?;
+        if opening.len() != self.suite.opening_len() {
+            return Err(Error::MalformedKeytrans(format!(
+                "commitment opening must be {} bytes for {:?}",
+                self.suite.opening_len(),
+                self.suite
+            )));
+        }
         let version = self
             .labels
             .get(label)
             .map_or(0, |s| s.versions.len() as u32);
         let (key, _proof) = self.derive_key(label, version)?;
-        let commitment = commit_update(&self.context, label, version, value, &opening)?;
+        let commitment = self
+            .suite
+            .commit(&self.context, label, version, value, opening)?;
         self.prefix.insert(key, &commitment);
         let prefix_root = self.prefix.root();
         self.snapshots.push(prefix_root);
@@ -308,7 +345,7 @@ impl KeytransDirectory {
             .push(VersionData {
                 commitment,
                 value: value.to_vec(),
-                opening,
+                opening: opening.to_vec(),
             });
         Ok(version)
     }
@@ -530,20 +567,44 @@ impl Directory for KeytransDirectory {
 /// VRF public key). Holds no directory.
 pub struct KeytransVerifier {
     context: String,
+    suite: KtSuite,
     vrf: Box<dyn Vrf>,
     vrf_public: VrfPublicKey,
 }
 
 impl KeytransVerifier {
     /// Build a verifier checking proofs produced under `vrf` against
-    /// `vrf_public`, with commitments under `context`.
+    /// `vrf_public`, with commitments under `context`, on the default
+    /// experimental [`KtSuite::MetamorphicHybridExp`] suite.
+    ///
+    /// For an on-spec IETF standard suite, use
+    /// [`KeytransVerifier::new_with_suite`] with the suite's matching VRF.
     #[must_use]
     pub fn new(context: impl Into<String>, vrf: Box<dyn Vrf>, vrf_public: VrfPublicKey) -> Self {
+        Self::new_with_suite(context, KtSuite::MetamorphicHybridExp, vrf, vrf_public)
+    }
+
+    /// Build a verifier on an explicit [`KtSuite`]. `vrf` must be the suite's
+    /// VRF (see [`KtSuite::vrf`]).
+    #[must_use]
+    pub fn new_with_suite(
+        context: impl Into<String>,
+        suite: KtSuite,
+        vrf: Box<dyn Vrf>,
+        vrf_public: VrfPublicKey,
+    ) -> Self {
         Self {
             context: context.into(),
+            suite,
             vrf,
             vrf_public,
         }
+    }
+
+    /// The cipher suite this verifier checks against.
+    #[must_use]
+    pub fn suite(&self) -> KtSuite {
+        self.suite
     }
 
     /// Recompute the combined-tree root from a log entry's `(timestamp,
@@ -660,7 +721,9 @@ impl KeytransVerifier {
             (Some(g), Some(r)) => {
                 // Re-open the revealed value and match it to the greatest
                 // version's inclusion commitment.
-                let recomputed = commit_update(&self.context, label, g, &r.value, &r.opening)?;
+                let recomputed =
+                    self.suite
+                        .commit(&self.context, label, g, &r.value, &r.opening)?;
                 let committed = proof
                     .ladder
                     .iter()
@@ -709,7 +772,7 @@ impl KeytransVerifier {
         let revealed = proof.revealed.as_ref().ok_or_else(|| {
             Error::MalformedKeytrans("present fixed version is missing its revealed value".into())
         })?;
-        let recomputed = commit_update(
+        let recomputed = self.suite.commit(
             &self.context,
             label,
             proof.step.version,
@@ -790,7 +853,7 @@ impl KeytransVerifier {
         proof: &[u8],
     ) -> Result<SearchOutcome> {
         let root = root_array(root)?;
-        let typed = tls::decode_search_proof(proof)?;
+        let typed = tls::decode_search_proof(proof, self.suite.commitment_len())?;
         self.verify_search(&root, label, &typed)
     }
 
@@ -805,7 +868,7 @@ impl KeytransVerifier {
         proof: &[u8],
     ) -> Result<SearchOutcome> {
         let root = root_array(root)?;
-        let typed = tls::decode_fixed_version_proof(proof)?;
+        let typed = tls::decode_fixed_version_proof(proof, self.suite.commitment_len())?;
         self.verify_fixed_version(&root, label, &typed)
     }
 
@@ -817,7 +880,7 @@ impl KeytransVerifier {
     /// [`Error::KeytransRootMismatch`].
     pub fn verify_monitor_bytes(&self, root: &[u8], label: &[u8], proof: &[u8]) -> Result<bool> {
         let root = root_array(root)?;
-        let typed = tls::decode_monitor_proof(proof)?;
+        let typed = tls::decode_monitor_proof(proof, self.suite.commitment_len())?;
         self.verify_monitor(&root, label, &typed)?;
         Ok(true)
     }
@@ -855,7 +918,7 @@ impl DirectoryVerifier for KeytransVerifier {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use crate::vrf::Ecvrf;
+    use crate::vrf::{Ecvrf, EcvrfP256};
 
     const CTX: &str = "acme/keytrans-commitment/v1";
 
@@ -869,8 +932,114 @@ mod tests {
         KeytransVerifier::new(CTX, Box::new(Ecvrf), dir.vrf_public().clone())
     }
 
-    fn opening(tag: u8) -> [u8; NC] {
-        [tag; NC]
+    /// Build a directory + matching verifier for an on-spec standard suite.
+    fn standard_pair(suite: KtSuite) -> (KeytransDirectory, KeytransVerifier) {
+        let (sk, pk) = suite.vrf().generate_keypair();
+        let dir = KeytransDirectory::new_with_suite(CTX, suite, suite.vrf(), sk, pk.clone());
+        let ver = KeytransVerifier::new_with_suite(CTX, suite, suite.vrf(), pk);
+        (dir, ver)
+    }
+
+    // --- Standard-suite round-trip KATs (KEYTRANS_EXP_04, MOVABLE) ---
+    //
+    // Prover -> verifier round-trips for both on-spec IETF suites, exercising
+    // the 16-byte opening / 32-byte HMAC-SHA256 commitment path end to end
+    // (search, fixed-version, monitor), plus the byte-oriented SDK path with the
+    // suite's commitment width. These vectors are experimental / movable — they
+    // track the draft and are NOT in the frozen conformance / cross-language
+    // suites.
+
+    #[test]
+    fn standard_suites_search_fixed_version_monitor_round_trip() {
+        for suite in [KtSuite::Kt128Sha256P256, KtSuite::Kt128Sha256Ed25519] {
+            let (mut dir, ver) = standard_pair(suite);
+            let op = vec![0x5A; suite.opening_len()]; // Nc = 16 bytes
+            for i in 0..5u32 {
+                dir.update(
+                    b"alice",
+                    format!("head-v{i}").as_bytes(),
+                    1_000 + u64::from(i) * 1_000,
+                    &op,
+                )
+                .unwrap();
+            }
+            dir.update(b"bob", b"bob-v0", 9_000, &op).unwrap();
+            let root = dir.combined_root().unwrap();
+
+            // Greatest-version search (present + absent).
+            let search = dir.prove_search(b"alice").unwrap();
+            assert_eq!(search.greatest_version, Some(4));
+            assert_eq!(
+                ver.verify_search(&root, b"alice", &search).unwrap(),
+                SearchOutcome::Present(b"head-v4".to_vec())
+            );
+            let absent = dir.prove_search(b"carol").unwrap();
+            assert_eq!(
+                ver.verify_search(&root, b"carol", &absent).unwrap(),
+                SearchOutcome::Absent
+            );
+
+            // Fixed-version.
+            let fv = dir.prove_fixed_version(b"alice", 2).unwrap();
+            assert_eq!(
+                ver.verify_fixed_version(&root, b"alice", &fv).unwrap(),
+                SearchOutcome::Present(b"head-v2".to_vec())
+            );
+
+            // Monitor.
+            let mon = dir.prove_monitor(b"alice", 3).unwrap();
+            assert!(ver.verify_monitor(&root, b"alice", &mon).is_ok());
+
+            // Byte-oriented path uses the suite's 32-byte commitment width.
+            let clen = suite.commitment_len();
+            assert_eq!(clen, 32);
+            let search_bytes = search.encode().unwrap();
+            assert_eq!(
+                ver.verify_search_bytes(&root, b"alice", &search_bytes)
+                    .unwrap(),
+                SearchOutcome::Present(b"head-v4".to_vec())
+            );
+            assert_eq!(
+                KeytransSearchProof::decode(&search_bytes, clen)
+                    .unwrap()
+                    .greatest_version,
+                Some(4)
+            );
+
+            // A tampered revealed value is rejected (commitment mismatch).
+            let mut forged = search.clone();
+            forged.revealed = Some(RevealedValue {
+                value: b"forged".to_vec(),
+                opening: op.clone(),
+            });
+            assert_eq!(
+                ver.verify_search(&root, b"alice", &forged),
+                Err(Error::CommitmentMismatch)
+            );
+        }
+    }
+
+    #[test]
+    fn standard_suite_rejects_wrong_opening_length() {
+        let suite = KtSuite::Kt128Sha256P256;
+        let (mut dir, _ver) = standard_pair(suite);
+        // 32-byte opening is wrong for a standard suite (Nc = 16).
+        assert!(matches!(
+            dir.update(b"alice", b"v", 1_000, &[0u8; 32]),
+            Err(Error::MalformedKeytrans(_))
+        ));
+    }
+
+    #[test]
+    fn standard_suites_backend_id_is_combined_tree() {
+        let (dir, ver) = standard_pair(KtSuite::Kt128Sha256Ed25519);
+        assert_eq!(Directory::backend_id(&dir), KEYTRANS_EXP_V04);
+        assert_eq!(DirectoryVerifier::backend_id(&ver), KEYTRANS_EXP_V04);
+        assert_eq!(EcvrfP256.suite_id(), 0x01);
+    }
+
+    fn opening(tag: u8) -> [u8; crate::keytrans::NC] {
+        [tag; crate::keytrans::NC]
     }
 
     #[test]
@@ -1090,14 +1259,21 @@ mod tests {
         let mon_bytes = mon.encode().unwrap();
         assert!(v.verify_monitor_bytes(&root, b"alice", &mon_bytes).unwrap());
 
-        // Round-trip the typed proofs through the wire too.
+        // Round-trip the typed proofs through the wire too (experimental suite:
+        // 64-byte commitment tags).
+        let clen = KtSuite::MetamorphicHybridExp.commitment_len();
         assert_eq!(
-            KeytransFixedVersionProof::decode(&fv_bytes)
+            KeytransFixedVersionProof::decode(&fv_bytes, clen)
                 .unwrap()
                 .step
                 .version,
             2
         );
-        assert_eq!(KeytransMonitorProof::decode(&mon_bytes).unwrap().version, 3);
+        assert_eq!(
+            KeytransMonitorProof::decode(&mon_bytes, clen)
+                .unwrap()
+                .version,
+            3
+        );
     }
 }

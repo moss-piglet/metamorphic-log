@@ -32,15 +32,52 @@
 
 use metamorphic_crypto::hash::sha256;
 
-use crate::commitment::{COMMITMENT_LEN, Commitment};
 use crate::error::{Error, Result};
 
 use super::NH;
 
 /// Length in bytes of a prefix-tree search key (a VRF output, truncated to the
-/// suite's `VRF.Nh`). The experimental private suite truncates the 64-byte
-/// ECVRF-Ed25519 output to 32 bytes.
+/// suite's `VRF.Nh`). All built suites use a 32-byte search key: the
+/// experimental / Ed25519 suites truncate the 64-byte ECVRF-Ed25519 output; the
+/// P-256 suite's 32-byte output is used verbatim.
 pub const SEARCH_KEY_LEN: usize = 32;
+
+/// A KEYTRANS commitment tag, of the width the active [`super::KtSuite`] dictates
+/// (64 bytes for the experimental SHA3-512 suite, 32 bytes for the standard
+/// HMAC-SHA256 suites).
+///
+/// The KEYTRANS layer carries commitments as this variable-width value — rather
+/// than the fixed 64-byte [`crate::commitment::Commitment`] — precisely so the
+/// on-spec 32-byte HMAC tag and the private 64-byte SHA3-512 tag can share one
+/// prefix-tree / proof code path. It is opaque bytes; the suite fixes the width.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct KtCommitment(Vec<u8>);
+
+impl KtCommitment {
+    /// Wrap raw commitment-tag bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the raw commitment-tag bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// The commitment-tag width, in bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the tag is empty (never true for a well-formed commitment).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
 
 /// Domain-separation byte for a prefix-tree leaf (§10.9).
 const LEAF_PREFIX: u8 = 0x01;
@@ -54,13 +91,15 @@ pub fn stand_in() -> [u8; NH] {
 }
 
 /// The leaf value for a stored `(vrf_output, commitment)` pair (§10.9):
-/// `Hash(0x01 || vrf_output || commitment)`.
+/// `Hash(0x01 || vrf_output || commitment)`. The `commitment` bytes are the
+/// active suite's tag (32 or 64 bytes); both feed the same domain-separated
+/// SHA-256 leaf hash.
 #[must_use]
-pub fn hash_leaf(vrf_output: &[u8; SEARCH_KEY_LEN], commitment: &Commitment) -> [u8; NH] {
-    let mut buf = [0u8; 1 + SEARCH_KEY_LEN + COMMITMENT_LEN];
-    buf[0] = LEAF_PREFIX;
-    buf[1..1 + SEARCH_KEY_LEN].copy_from_slice(vrf_output);
-    buf[1 + SEARCH_KEY_LEN..].copy_from_slice(commitment.as_bytes());
+pub fn hash_leaf(vrf_output: &[u8; SEARCH_KEY_LEN], commitment: &KtCommitment) -> [u8; NH] {
+    let mut buf = Vec::with_capacity(1 + SEARCH_KEY_LEN + commitment.len());
+    buf.push(LEAF_PREFIX);
+    buf.extend_from_slice(vrf_output);
+    buf.extend_from_slice(commitment.as_bytes());
     sha256(&buf)
 }
 
@@ -86,7 +125,7 @@ fn key_bit(key: &[u8; SEARCH_KEY_LEN], i: usize) -> u8 {
 /// - zero entries → a [`stand_in`] (the subtree is absent),
 /// - one entry → its leaf value (a leaf sits wherever it is alone),
 /// - many entries → a parent over the `0`/`1` partition of the `depth`-th bit.
-fn subtree(entries: &[(&[u8; SEARCH_KEY_LEN], &Commitment)], depth: usize) -> [u8; NH] {
+fn subtree(entries: &[(&[u8; SEARCH_KEY_LEN], &KtCommitment)], depth: usize) -> [u8; NH] {
     match entries.len() {
         0 => stand_in(),
         1 => hash_leaf(entries[0].0, entries[0].1),
@@ -110,7 +149,7 @@ fn subtree(entries: &[(&[u8; SEARCH_KEY_LEN], &Commitment)], depth: usize) -> [u
 /// arrives in Slice 9d.
 #[derive(Clone, Debug, Default)]
 pub struct PrefixTree {
-    leaves: Vec<([u8; SEARCH_KEY_LEN], Commitment)>,
+    leaves: Vec<([u8; SEARCH_KEY_LEN], KtCommitment)>,
 }
 
 impl PrefixTree {
@@ -122,7 +161,7 @@ impl PrefixTree {
 
     /// Insert or replace the entry for `vrf_output`, committing to it as
     /// `Hash(0x01 || vrf_output || commitment)`.
-    pub fn insert(&mut self, vrf_output: [u8; SEARCH_KEY_LEN], commitment: &Commitment) {
+    pub fn insert(&mut self, vrf_output: [u8; SEARCH_KEY_LEN], commitment: &KtCommitment) {
         match self.leaves.iter_mut().find(|(k, _)| *k == vrf_output) {
             Some(entry) => entry.1 = commitment.clone(),
             None => self.leaves.push((vrf_output, commitment.clone())),
@@ -184,7 +223,7 @@ impl PrefixTree {
 /// Recursively build a single-key proof, pushing each level's sibling subtree
 /// value into `copath` (deepest-first; the caller reverses it to depth order).
 fn prove_subtree(
-    entries: &[(&[u8; SEARCH_KEY_LEN], &Commitment)],
+    entries: &[(&[u8; SEARCH_KEY_LEN], &KtCommitment)],
     key: &[u8; SEARCH_KEY_LEN],
     depth: usize,
     copath: &mut Vec<[u8; NH]>,
@@ -245,16 +284,17 @@ pub enum PrefixSearchResultType {
 /// A prefix-tree leaf's revealed contents (§11.2 `PrefixLeaf`): the search key
 /// and the commitment stored at a *non-matching* terminal leaf.
 ///
-/// The experimental private suite carries the full [`crate::commitment`]
-/// (64-byte SHA3-512) value here, rather than the spec's 32-byte `Hash.Nh`
-/// commitment — a documented, version-tagged deviation (the private suite's PQ
-/// commitment is wider than the standard suites' HMAC tag).
+/// The commitment is the active suite's [`KtCommitment`] tag: the standard
+/// suites carry the spec's 32-byte HMAC-SHA256 tag, while the experimental
+/// private suite carries the wider 64-byte SHA3-512 [`crate::commitment`] value
+/// (a documented, version-tagged deviation — its PQ commitment is wider than the
+/// standard suites' HMAC tag).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrefixLeaf {
     /// The (different) search key stored at the terminal leaf.
     pub vrf_output: [u8; SEARCH_KEY_LEN],
     /// The commitment stored at that leaf.
-    pub commitment: Commitment,
+    pub commitment: KtCommitment,
 }
 
 /// A single-key prefix-tree search proof (§11.2 `PrefixProof`, restricted to one
@@ -313,7 +353,7 @@ fn recompute_root(
 pub fn verify_inclusion(
     root: &[u8; NH],
     search_key: &[u8; SEARCH_KEY_LEN],
-    commitment: &Commitment,
+    commitment: &KtCommitment,
     proof: &PrefixProof,
 ) -> Result<()> {
     if proof.result_type != PrefixSearchResultType::Inclusion {
@@ -411,12 +451,16 @@ mod tests {
     use crate::commitment::Opening;
     use crate::commitment::commit_with_opening;
 
-    fn commitment(tag: u8) -> Commitment {
-        commit_with_opening(
+    // A 64-byte experimental-suite commitment, wrapped as a KtCommitment. The
+    // prefix-tree hashing is width-agnostic; a 32-byte tag exercises the same
+    // paths (see the standard-suite round-trip vectors in `ext` / the KAT file).
+    fn commitment(tag: u8) -> KtCommitment {
+        let c = commit_with_opening(
             "test/keytrans-commitment/v1",
             &[tag; 4],
             &Opening::from_bytes([tag; 32]),
-        )
+        );
+        KtCommitment::from_bytes(c.as_bytes().to_vec())
     }
 
     fn key(byte0: u8) -> [u8; SEARCH_KEY_LEN] {

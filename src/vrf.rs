@@ -248,6 +248,73 @@ impl Vrf for Ecvrf {
     }
 }
 
+/// Standard **ECVRF-P256-SHA256-TAI** (RFC 9381 ciphersuite `0x01`), the VRF of
+/// the on-spec IETF KEYTRANS suite `KT_128_SHA256_P256` (§15.1).
+///
+/// A thin adapter over [`metamorphic_crypto::vrf_p256`]'s audited primitive
+/// (RustCrypto `p256`, locked to the RFC 9381 Appendix B.1 test vectors). No
+/// cryptography lives here — only the opaque-byte ↔ primitive plumbing, mirroring
+/// [`Ecvrf`].
+///
+/// The construction's native output (`beta`) is a 32-byte SHA-256 digest, which
+/// is exactly the KEYTRANS prefix-tree [`crate::keytrans::SEARCH_KEY_LEN`], so no
+/// truncation is applied (unlike ECVRF-Ed25519's 64→32). To fit the shared
+/// 64-byte [`VrfOutput`] container, the 32-byte output is stored in the leading
+/// 32 bytes (the remainder zero); [`VrfOutput::index`] and
+/// [`crate::keytrans::search_key`] read exactly those leading 32 bytes, so the
+/// derived search key is the unmodified VRF output.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EcvrfP256;
+
+/// Widen a 32-byte P-256 VRF output into the shared 64-byte [`VrfOutput`]
+/// container (leading 32 bytes = output, trailing 32 = zero).
+fn widen_p256_output(beta: [u8; metamorphic_crypto::ECVRF_P256_OUTPUT_LEN]) -> VrfOutput {
+    let mut wide = [0u8; 64];
+    wide[..metamorphic_crypto::ECVRF_P256_OUTPUT_LEN].copy_from_slice(&beta);
+    VrfOutput(wide)
+}
+
+impl Vrf for EcvrfP256 {
+    fn suite_id(&self) -> u8 {
+        metamorphic_crypto::ECVRF_P256_SHA256_TAI_SUITE
+    }
+
+    fn generate_keypair(&self) -> (VrfSecretKey, VrfPublicKey) {
+        let (sk, pk) = metamorphic_crypto::ecvrf_p256_generate_keypair();
+        (VrfSecretKey(sk.to_vec()), VrfPublicKey(pk.to_vec()))
+    }
+
+    fn derive_public_key(&self, secret_key: &VrfSecretKey) -> Result<VrfPublicKey> {
+        let pk = metamorphic_crypto::ecvrf_p256_public_key(secret_key.as_bytes())
+            .map_err(|e| Error::Vrf(e.to_string()))?;
+        Ok(VrfPublicKey(pk.to_vec()))
+    }
+
+    fn prove(&self, secret_key: &VrfSecretKey, alpha: &[u8]) -> Result<VrfProof> {
+        let pi = metamorphic_crypto::ecvrf_p256_prove(secret_key.as_bytes(), alpha)
+            .map_err(|e| Error::Vrf(e.to_string()))?;
+        Ok(VrfProof(pi.to_vec()))
+    }
+
+    fn verify(
+        &self,
+        public_key: &VrfPublicKey,
+        alpha: &[u8],
+        proof: &VrfProof,
+    ) -> Result<Option<VrfOutput>> {
+        let beta =
+            metamorphic_crypto::ecvrf_p256_verify(public_key.as_bytes(), alpha, proof.as_bytes())
+                .map_err(|e| Error::Vrf(e.to_string()))?;
+        Ok(beta.map(widen_p256_output))
+    }
+
+    fn proof_to_output(&self, proof: &VrfProof) -> Result<VrfOutput> {
+        let beta = metamorphic_crypto::ecvrf_p256_proof_to_hash(proof.as_bytes())
+            .map_err(|e| Error::Vrf(e.to_string()))?;
+        Ok(widen_p256_output(beta))
+    }
+}
+
 /// Domain-separation tag for the designed-in hybrid VRF output combiner.
 pub const HYBRID_OUTPUT_DST: &str = "metamorphic.app/vrf-hybrid-output/v1";
 
@@ -378,5 +445,56 @@ mod tests {
         // relies on to hold a `Box<dyn Vrf>` per namespace.
         let vrf: Box<dyn Vrf> = Box::new(Ecvrf);
         assert_eq!(vrf.suite_id(), 0x03);
+    }
+
+    #[test]
+    fn p256_suite_id_is_tai() {
+        assert_eq!(EcvrfP256.suite_id(), 0x01);
+    }
+
+    #[test]
+    fn p256_prove_verify_roundtrip_through_trait() {
+        let vrf = EcvrfP256;
+        let (sk, pk) = vrf.generate_keypair();
+        let alpha = b"alice@example.com";
+        let pi = vrf.prove(&sk, alpha).unwrap();
+        let out = vrf.verify(&pk, alpha, &pi).unwrap();
+        assert_eq!(out, Some(vrf.proof_to_output(&pi).unwrap()));
+    }
+
+    #[test]
+    fn p256_output_occupies_leading_32_bytes() {
+        // The 32-byte P-256 output is the search key verbatim (no truncation):
+        // it sits in the leading 32 bytes and the trailing 32 are zero.
+        let vrf = EcvrfP256;
+        let (sk, pk) = vrf.generate_keypair();
+        let pi = vrf.prove(&sk, b"x").unwrap();
+        let out = vrf.verify(&pk, b"x", &pi).unwrap().unwrap();
+        assert_eq!(&out.as_bytes()[32..], &[0u8; 32]);
+        assert_eq!(&out.index()[..], &out.as_bytes()[..32]);
+    }
+
+    #[test]
+    fn p256_verify_rejects_tampered_input_and_wrong_key() {
+        let vrf = EcvrfP256;
+        let (sk, pk) = vrf.generate_keypair();
+        let (_sk2, pk2) = vrf.generate_keypair();
+        let pi = vrf.prove(&sk, b"original").unwrap();
+        assert_eq!(vrf.verify(&pk, b"tampered", &pi).unwrap(), None);
+        assert_eq!(vrf.verify(&pk2, b"original", &pi).unwrap(), None);
+    }
+
+    #[test]
+    fn p256_derive_public_key_matches_keygen() {
+        let vrf = EcvrfP256;
+        let (sk, pk) = vrf.generate_keypair();
+        assert_eq!(vrf.derive_public_key(&sk).unwrap(), pk);
+    }
+
+    #[test]
+    fn both_vrfs_object_safe_and_distinct_suites() {
+        let ed: Box<dyn Vrf> = Box::new(Ecvrf);
+        let p256: Box<dyn Vrf> = Box::new(EcvrfP256);
+        assert_ne!(ed.suite_id(), p256.suite_id());
     }
 }

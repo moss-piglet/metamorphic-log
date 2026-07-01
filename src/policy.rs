@@ -386,32 +386,35 @@ impl DirectoryMode {
 }
 
 /// The Layer-3 **KEYTRANS cipher suite** a namespace declares (Slice 9e, design
-/// §3.3), only meaningful when [`DirectoryMode::Keytrans`] is the route. This
-/// mirrors [`VrfMode`]'s reserved-but-rejected pattern: the spec's standard
-/// suites have their wire identifiers **reserved** here so the policy menu is
-/// industry-aligned and forward-compatible, but they are **rejected at
-/// validation** because this crate does not build their HMAC-SHA256 commitment
-/// (it ships the post-quantum SHA3-512 commitment instead).
+/// §3.3), only meaningful when [`DirectoryMode::Keytrans`] is the route.
+///
+/// As of 0.1.4 all three suites are **built and legal** (still
+/// `KEYTRANS_EXP_04` / movable — the KEYTRANS wire bytes track the draft and are
+/// not byte-frozen like the CONIKS / policy-v1 / key_history_v1 vectors):
 ///
 /// - [`KeytransSuite::MetamorphicHybridExp`] (`0xF000`, default) — the private,
 ///   experimental hybrid-PQ suite: SHA-256 trees for KEYTRANS interop, the
 ///   SHA3-512 [`crate::commitment`] (the PQ half), composite hybrid-PQ tree-head
-///   signatures, and ECVRF-Ed25519 labels. The **only legal** suite in v0.1.
-/// - [`KeytransSuite::Kt128Sha256Ed25519`] (`0x0002`) /
-///   [`KeytransSuite::Kt128Sha256P256`] (`0x0001`) — the spec's standard suites
-///   (HMAC-SHA256 commitment, ECVRF-Ed25519 / ECVRF-P256). **Reserved but
-///   rejected**: validatable only once `metamorphic-crypto` exposes the
-///   on-spec HMAC-SHA256 commitment + P-256 VRF primitives (a later slice). The
-///   identifiers exist now so no developer choosing on-spec interop is locked
-///   out of the policy surface.
+///   signatures, and ECVRF-Ed25519 labels.
+/// - [`KeytransSuite::Kt128Sha256P256`] (`0x0001`) — the on-spec IETF standard
+///   suite: `HMAC-SHA256(Kc, CommitmentValue)` commitment (§10.6) and
+///   ECVRF-P256-SHA256-TAI labels (no truncation).
+/// - [`KeytransSuite::Kt128Sha256Ed25519`] (`0x0002`) — the on-spec IETF
+///   standard suite: `HMAC-SHA256(Kc, CommitmentValue)` commitment and
+///   ECVRF-Ed25519 labels (output truncated to 32 bytes).
+///
+/// Choosing a standard suite gives the standardized HMAC / curve construction
+/// for KEYTRANS conformance; the private suite trades interop for a
+/// post-quantum commitment. The classical VRFs provide index privacy only and
+/// are not FIPS-validated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum KeytransSuite {
-    /// `0xF000` — the experimental private hybrid-PQ suite (default, legal).
+    /// `0xF000` — the experimental private hybrid-PQ suite (default).
     #[default]
     MetamorphicHybridExp,
-    /// `0x0002` — standard `KT128_SHA256_Ed25519` (reserved; not yet built).
+    /// `0x0002` — standard `KT_128_SHA256_Ed25519` (HMAC-SHA256 + ECVRF-Ed25519).
     Kt128Sha256Ed25519,
-    /// `0x0001` — standard `KT128_SHA256_P256` (reserved; not yet built).
+    /// `0x0001` — standard `KT_128_SHA256_P256` (HMAC-SHA256 + ECVRF-P256).
     Kt128Sha256P256,
 }
 
@@ -441,23 +444,36 @@ impl KeytransSuite {
         }
     }
 
-    /// Whether this suite has a built construction in v0.1 (the typed analogue
-    /// of [`VrfMode::expected_vrf_suite_id`] returning `Some`). Only the
-    /// experimental private suite is built; the standard suites are reserved.
+    /// Whether this suite has a built construction. All three suites are built
+    /// as of Slice 9 (0.1.4): the private experimental suite plus the on-spec
+    /// IETF standard `KT_128_SHA256_P256` / `KT_128_SHA256_Ed25519` suites. Kept
+    /// as an explicit predicate so a *future* reserved identifier can be added
+    /// (returning `false`) without touching the validation flow.
     #[must_use]
     pub fn is_built(self) -> bool {
-        matches!(self, KeytransSuite::MetamorphicHybridExp)
+        matches!(
+            self,
+            KeytransSuite::MetamorphicHybridExp
+                | KeytransSuite::Kt128Sha256Ed25519
+                | KeytransSuite::Kt128Sha256P256
+        )
     }
 
     /// The directory [`DirectoryBackendId`] this suite is served under, or
     /// `None` for a reserved (not-yet-built) suite. Drives **declared ==
     /// observed** for the directory backend (the suite analogue of
     /// [`CheckpointSuite::crypto_suite`]).
+    ///
+    /// All built KEYTRANS suites share the combined-tree backend
+    /// ([`KEYTRANS_EXP_V04`]); the suite (curve + commitment) is distinguished by
+    /// [`KeytransSuite::suite_id`], carried in the policy record and enforced
+    /// alongside the backend id.
     #[must_use]
     pub fn backend_id(self) -> Option<DirectoryBackendId> {
-        match self {
-            KeytransSuite::MetamorphicHybridExp => Some(KEYTRANS_EXP_V04),
-            KeytransSuite::Kt128Sha256Ed25519 | KeytransSuite::Kt128Sha256P256 => None,
+        if self.is_built() {
+            Some(KEYTRANS_EXP_V04)
+        } else {
+            None
         }
     }
 }
@@ -530,9 +546,9 @@ impl NamespacePolicy {
     /// selects [`DirectoryMode::Keytrans`] under the given [`KeytransSuite`],
     /// emitting a v2 record.
     ///
-    /// The suite must be *built* ([`KeytransSuite::is_built`]); a reserved
-    /// standard suite is [`Error::MalformedPolicy`] (the
-    /// reserved-but-rejected wall).
+    /// The suite must be *built* ([`KeytransSuite::is_built`]); as of 0.1.4 all
+    /// defined suites are built, so this rejects only a future reserved
+    /// identifier.
     ///
     /// # Errors
     /// Returns [`Error::MalformedPolicy`] for any well-formedness violation
@@ -640,13 +656,12 @@ impl NamespacePolicy {
                 }
             }
             DirectoryMode::Keytrans => {
-                // Reserved-but-rejected wall: only the built experimental suite
-                // is legal in v0.1 (mirrors VrfMode::PurePqExperimental).
+                // Every KEYTRANS suite is built as of 0.1.4; a future reserved
+                // (not-yet-built) identifier would be rejected here, mirroring
+                // VrfMode::PurePqExperimental.
                 if !self.keytrans_suite.is_built() {
                     return Err(Error::MalformedPolicy(format!(
-                        "keytrans_suite {:?} is reserved but not built in v0.1 \
-                         (only MetamorphicHybridExp); on-spec HMAC-SHA256 suites \
-                         await the metamorphic-crypto commitment primitive",
+                        "keytrans_suite {:?} is reserved but not built",
                         self.keytrans_suite
                     )));
                 }
@@ -1728,27 +1743,36 @@ mod tests {
     }
 
     #[test]
-    fn keytrans_reserved_suites_are_rejected() {
-        // Standard suites parse on the wire but are reserved-but-rejected at
-        // validation (mirrors VrfMode::PurePqExperimental).
-        assert!(matches!(
-            keytrans_policy(KeytransSuite::Kt128Sha256Ed25519),
-            Err(Error::MalformedPolicy(_))
-        ));
-        assert!(matches!(
-            keytrans_policy(KeytransSuite::Kt128Sha256P256),
-            Err(Error::MalformedPolicy(_))
-        ));
-        // ...and a forged v2 record carrying a reserved suite is rejected on parse.
-        let mut bytes = keytrans_policy(KeytransSuite::MetamorphicHybridExp)
-            .unwrap()
-            .canonical_bytes();
-        let n = bytes.len();
-        bytes[n - 2..].copy_from_slice(&KeytransSuite::Kt128Sha256P256.suite_id().to_be_bytes());
-        assert!(matches!(
-            NamespacePolicy::parse(&bytes),
-            Err(Error::MalformedPolicy(_))
-        ));
+    fn keytrans_standard_suites_are_legal() {
+        // As of 0.1.4 the on-spec IETF standard suites are built and legal on
+        // the KEYTRANS route (they were reserved-but-rejected through 0.1.3).
+        for suite in [
+            KeytransSuite::Kt128Sha256Ed25519,
+            KeytransSuite::Kt128Sha256P256,
+        ] {
+            let p = keytrans_policy(suite).unwrap();
+            assert_eq!(p.keytrans_suite(), suite);
+            assert!(suite.is_built());
+            // All KEYTRANS suites are served under the combined-tree backend.
+            assert_eq!(p.declared_directory_backend_id(), Some(KEYTRANS_EXP_V04));
+            // A v2 record carrying a standard suite round-trips byte-for-byte.
+            let bytes = p.canonical_bytes();
+            assert_eq!(&bytes[..4], &2u32.to_be_bytes());
+            let parsed = NamespacePolicy::parse(&bytes).unwrap();
+            assert_eq!(parsed, p);
+            assert_eq!(parsed.keytrans_suite(), suite);
+        }
+    }
+
+    #[test]
+    fn keytrans_suite_ids_match_spec() {
+        // §15.1 wire identifiers.
+        assert_eq!(KeytransSuite::Kt128Sha256P256.suite_id(), 0x0001);
+        assert_eq!(KeytransSuite::Kt128Sha256Ed25519.suite_id(), 0x0002);
+        assert_eq!(
+            KeytransSuite::MetamorphicHybridExp.suite_id(),
+            crate::keytrans::KT_EXP_METAMORPHIC_HYBRID
+        );
     }
 
     #[test]

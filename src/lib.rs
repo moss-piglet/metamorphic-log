@@ -192,17 +192,15 @@
 //!
 //! **Slice 9e (#339, Slice 9) — KEYTRANS policy + WASM + cross-language KAT:**
 //! the experimental KEYTRANS backend becomes *selectable* and *verifiable from
-//! the SDK*. [`policy::NamespacePolicy`] gains two Layer-3 posture axes mirroring
-//! the [`policy::VrfMode`] reserved-but-rejected pattern: [`policy::DirectoryMode`]
-//! (`Coniks` default / `Keytrans`) and [`policy::KeytransSuite`]
-//! (`MetamorphicHybridExp` = the legal `0xF000` private hybrid-PQ suite; the
-//! standard `Kt128Sha256{Ed25519,P256}` suites are **reserved but rejected**
-//! until `metamorphic-crypto` exposes their on-spec HMAC-SHA256 commitment).
-//! The record format is bumped to [`policy::POLICY_FORMAT_VERSION`] `= 2`, but
-//! **backward-compatibly**: a default CONIKS-route policy still serializes as a
-//! v1 record, so every frozen Slice-5 policy KAT round-trips byte-for-byte;
-//! only a `Keytrans`-route policy emits a v2 record. `declared == observed`
-//! extends to the directory backend
+//! the SDK*. [`policy::NamespacePolicy`] gains two Layer-3 posture axes:
+//! [`policy::DirectoryMode`] (`Coniks` default / `Keytrans`) and
+//! [`policy::KeytransSuite`] (`MetamorphicHybridExp` = the `0xF000` private
+//! hybrid-PQ suite; the on-spec IETF standard `Kt128Sha256{P256,Ed25519}`
+//! suites). The record format is bumped to [`policy::POLICY_FORMAT_VERSION`]
+//! `= 2`, but **backward-compatibly**: a default CONIKS-route policy still
+//! serializes as a v1 record, so every frozen Slice-5 policy KAT round-trips
+//! byte-for-byte; only a `Keytrans`-route policy emits a v2 record.
+//! `declared == observed` extends to the directory backend
 //! ([`policy::NamespacePolicy::enforce_directory_backend`]). The 9d byte-oriented
 //! [`directory::DirectoryVerifier::verify_search`] stub is now **wired**: the
 //! private `keytrans::tls` submodule gains a movable, length-prefix-disciplined
@@ -215,6 +213,22 @@
 //! version-tagged Rust↔JS byte-parity KAT (explicitly **movable**, separate from
 //! the frozen `key_history_v1` vectors) locks the experimental suite. Everything
 //! stays `KEYTRANS_EXP_04`-tagged; the KEYTRANS wire bytes are **not** frozen.
+//!
+//! **Slice 9 (0.1.4) — on-spec IETF standard suites:** the standard §15.1
+//! suites [`policy::KeytransSuite::Kt128Sha256P256`] (`0x0001`) and
+//! [`policy::KeytransSuite::Kt128Sha256Ed25519`] (`0x0002`) are now **built and
+//! legal** (they were reserved-but-rejected through 0.1.3). Each computes the
+//! §10.6 commitment as `HMAC-SHA256(Kc, CommitmentValue)` (16-byte opening,
+//! 32-byte tag) via [`metamorphic_crypto::hmac_sha256`], and derives search keys
+//! with ECVRF-P256-SHA256-TAI ([`vrf::EcvrfP256`], no truncation) and
+//! ECVRF-Ed25519 (truncated to 32 bytes) respectively. The directory core
+//! ([`keytrans::KtSuite`]) suite-dispatches the commitment construction, opening
+//! length, commitment-tag width, and VRF; the private
+//! [`policy::KeytransSuite::MetamorphicHybridExp`] suite (SHA3-512 commitment,
+//! the post-quantum trade-off) is unchanged and remains the default. The
+//! standard suites are still `KEYTRANS_EXP_04`-tagged and **movable** (the
+//! KEYTRANS wire tracks the draft until Last Call); their classical VRFs provide
+//! index privacy only and are not FIPS-validated.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
