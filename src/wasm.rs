@@ -35,7 +35,7 @@ use crate::checkpoint::Checkpoint;
 use crate::commitment::{Commitment, Opening};
 use crate::coniks::{AbsenceProof, LookupProof, Namespace};
 use crate::directory::DirectoryBackendId;
-use crate::keytrans::KeytransVerifier;
+use crate::keytrans::{KeytransVerifier, KtSuite};
 use crate::leaf::key_history_v1::Entry;
 use crate::note::{SignedNote, VerifierKey};
 use crate::policy::{CommitmentHash, NamespacePolicy, SignedPolicy};
@@ -461,8 +461,69 @@ pub fn keytrans_verify_monitor(
         .map_err(to_js)
 }
 
-/// Enforce **declared == observed** for an observed directory backend id
-/// (Slice 9e): the verified policy's declared route + suite must match the
+// --- Suite-aware variants (on-spec IETF standard suites) -------------------
+//
+// The functions above default to the experimental private suite
+// (`0xF000`, ECVRF-Ed25519 + SHA3-512 commitment). These `*Suite` variants take
+// the §15.1 `suiteId` so the browser can verify the on-spec standard suites
+// (`0x0001` KT_128_SHA256_P256, `0x0002` KT_128_SHA256_Ed25519 — HMAC-SHA256
+// commitment) with behaviour identical to native. Still `KEYTRANS_EXP_04` /
+// movable.
+
+/// Verify an experimental KEYTRANS greatest-version search proof (§6) under an
+/// explicit §15.1 `suite_id`. Otherwise identical to [`keytrans_verify_search`].
+#[wasm_bindgen(js_name = "keytransVerifySearchSuite")]
+pub fn keytrans_verify_search_suite(
+    suite_id: u16,
+    context: &str,
+    vrf_public_b64: &str,
+    root_b64: &str,
+    label_b64: &str,
+    proof_b64: &str,
+) -> Result<JsValue, JsValue> {
+    let verifier = keytrans_verifier_for_suite(suite_id, context, vrf_public_b64)?;
+    let outcome = verifier
+        .verify_search_bytes(&decode(root_b64)?, &decode(label_b64)?, &decode(proof_b64)?)
+        .map_err(to_js)?;
+    Ok(search_outcome_to_js(&outcome))
+}
+
+/// Verify an experimental KEYTRANS fixed-version search proof (§7) under an
+/// explicit §15.1 `suite_id`.
+#[wasm_bindgen(js_name = "keytransVerifyFixedVersionSuite")]
+pub fn keytrans_verify_fixed_version_suite(
+    suite_id: u16,
+    context: &str,
+    vrf_public_b64: &str,
+    root_b64: &str,
+    label_b64: &str,
+    proof_b64: &str,
+) -> Result<JsValue, JsValue> {
+    let verifier = keytrans_verifier_for_suite(suite_id, context, vrf_public_b64)?;
+    let outcome = verifier
+        .verify_fixed_version_bytes(&decode(root_b64)?, &decode(label_b64)?, &decode(proof_b64)?)
+        .map_err(to_js)?;
+    Ok(search_outcome_to_js(&outcome))
+}
+
+/// Verify an experimental KEYTRANS monitoring proof (§8) under an explicit
+/// §15.1 `suite_id`.
+#[wasm_bindgen(js_name = "keytransVerifyMonitorSuite")]
+pub fn keytrans_verify_monitor_suite(
+    suite_id: u16,
+    context: &str,
+    vrf_public_b64: &str,
+    root_b64: &str,
+    label_b64: &str,
+    proof_b64: &str,
+) -> Result<bool, JsValue> {
+    let verifier = keytrans_verifier_for_suite(suite_id, context, vrf_public_b64)?;
+    verifier
+        .verify_monitor_bytes(&decode(root_b64)?, &decode(label_b64)?, &decode(proof_b64)?)
+        .map_err(to_js)
+}
+
+/// Enforce **declared == observed** for an observed directory backend id/// (Slice 9e): the verified policy's declared route + suite must match the
 /// backend that served a proof. `observed_backend_id` is the raw `u16` code
 /// (e.g. `0x0001` CONIKS, `0xF004` KEYTRANS_EXP_04). Returns `true` on match;
 /// throws on mismatch.
@@ -565,6 +626,23 @@ fn verified_policy(signed_b64: &str) -> Result<NamespacePolicy, JsValue> {
 fn keytrans_verifier(context: &str, vrf_public_b64: &str) -> Result<KeytransVerifier, JsValue> {
     let vrf_public = VrfPublicKey::from_bytes(decode(vrf_public_b64)?);
     Ok(KeytransVerifier::new(context, Box::new(Ecvrf), vrf_public))
+}
+
+/// Build a KEYTRANS relying-party verifier for an explicit §15.1 suite id,
+/// selecting the suite's VRF and commitment width.
+fn keytrans_verifier_for_suite(
+    suite_id: u16,
+    context: &str,
+    vrf_public_b64: &str,
+) -> Result<KeytransVerifier, JsValue> {
+    let suite = KtSuite::from_suite_id(suite_id).map_err(to_js)?;
+    let vrf_public = VrfPublicKey::from_bytes(decode(vrf_public_b64)?);
+    Ok(KeytransVerifier::new_with_suite(
+        context,
+        suite,
+        suite.vrf(),
+        vrf_public,
+    ))
 }
 
 /// Build the `{ present, valueB64 }` object from a verified search outcome.

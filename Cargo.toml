@@ -1,6 +1,6 @@
 [package]
 name = "metamorphic-log"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.85"
 description = "Tamper-evident, append-only transparency log + verification SDK for the Metamorphic platform: RFC 6962/9162 Merkle proofs, C2SP tlog-tiles substrate, witnessed checkpoints, hybrid post-quantum checkpoint signing, and CONIKS-style index privacy. Single source of truth for primitives is metamorphic-crypto."
@@ -45,7 +45,7 @@ harness = false
 # `signature_posture_from_signature`, each `-> (Suite, SignatureLevel)`) that the
 # `policy` module uses for declared==observed enforcement, mapping an observed
 # checkpoint key/signature to a posture without re-deriving any private wire tags.
-metamorphic-crypto = "0.8.1"
+metamorphic-crypto = "0.9.0"
 thiserror = "2"
 # OS CSPRNG for sampling commitment blinding nonces (prover side). Mirrors
 # metamorphic-crypto's wasm handling: getrandom 0.2 needs its `js` backend on
