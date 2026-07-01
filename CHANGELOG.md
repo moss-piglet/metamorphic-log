@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-07-01
+
+Supply-chain bump: `metamorphic-crypto` 0.9.0 → 0.10.0. 0.10.0 is additive only —
+it adds a standalone HKDF-SHA512 primitive (parity) that this crate does not use;
+its commitments continue to use HMAC-SHA256. **No wire/KAT/API changes** — the
+CONIKS, policy-v1, `key_history_v1`, and RFC 6962 tlog conformance vectors are
+byte-for-byte unchanged. `p256` stays pinned at `=0.14.0-rc.14`.
+
 ## [0.1.4] - 2026-06-30
 
 Slice 9 of EPIC #325 — makes the experimental **IETF KEYTRANS** directory
@@ -382,7 +390,8 @@ changelog entry.
   `wasm32-unknown-unknown` check, `rustsec/audit-check`, MSRV-1.85 floor build),
   with all third-party action refs SHA-pinned; Dependabot and FUNDING config.
 
-[Unreleased]: https://github.com/moss-piglet/metamorphic-log/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/moss-piglet/metamorphic-log/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.5
 [0.1.4]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.4
 [0.1.3]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.3
 [0.1.2]: https://github.com/moss-piglet/metamorphic-log/releases/tag/v0.1.2
