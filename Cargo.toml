@@ -1,6 +1,6 @@
 [package]
 name = "metamorphic-log"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.85"
 description = "Tamper-evident, append-only transparency log + verification SDK for the Metamorphic platform: RFC 6962/9162 Merkle proofs, C2SP tlog-tiles substrate, witnessed checkpoints, hybrid post-quantum checkpoint signing, and CONIKS-style index privacy. Single source of truth for primitives is metamorphic-crypto."
@@ -47,7 +47,7 @@ harness = false
 # checkpoint key/signature to a posture without re-deriving any private wire tags.
 # 0.10.0 adds a standalone HKDF-SHA512 primitive (parity); unused by this crate —
 # its commitments use HMAC-SHA256.
-metamorphic-crypto = "0.10.0"
+metamorphic-crypto = "0.10.2"
 thiserror = "2"
 # OS CSPRNG for sampling commitment blinding nonces (prover side). Mirrors
 # metamorphic-crypto's wasm handling: getrandom 0.2 needs its `js` backend on
