@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-07-08
+
+Supply-chain bump: `metamorphic-crypto` 0.10.0 → 0.10.2, propagating the
+`cmov` 0.5.3 → 0.5.4 security fix (RustSec **GHSA-3rjw-m598-pq24 /
+CVE-2026-50185**, aarch64 `Cmov`/`CmovEq` correctness), the `aes-gcm`
+rc → stable (0.11.0) bump, and `anyhow` 1.0.103 (clears RUSTSEC-2026-0190,
+build-tooling-only). Dependency-only — **no wire/KAT/API changes**; CONIKS,
+policy-v1, `key_history_v1`, and RFC 6962 tlog conformance vectors are
+byte-for-byte unchanged.
+
 ## [0.1.5] - 2026-07-01
 
 Supply-chain bump: `metamorphic-crypto` 0.9.0 → 0.10.0. 0.10.0 is additive only —
