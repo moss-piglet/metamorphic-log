@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-07-09
+
+Release-plumbing patch. **No library changes** — crate source, wire formats,
+byte layouts, and all conformance vectors are byte-for-byte identical to 0.1.7.
+
+The 0.1.8 release published to crates.io but then failed at the npm publish step
+(`Cannot find module 'sigstore'`), leaving npm and the GitHub Release
+unpublished. This release fixes the npm setup and completes the artifacts.
+
+### Changed
+
+- CI: the release workflow now uses Node 24 (which bundles a complete
+  npm >= 11.5.1) for npm trusted publishing, instead of the in-place
+  `npm install -g npm@latest` self-upgrade. That self-upgrade path is currently
+  broken — it leaves npm unable to resolve its bundled `sigstore` module during
+  provenance generation. A guard also fails fast if npm is older than 11.5.1.
+
 ## [0.1.8] - 2026-07-09
 
 Release-plumbing patch. **No library changes** — the crate source, wire
