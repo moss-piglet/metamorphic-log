@@ -1,13 +1,23 @@
-//! Browser **verification + monitor** SDK via `wasm-bindgen` (Slice 6).
+//! Browser **verification, monitor, and signing** SDK via `wasm-bindgen`
+//! (Slice 6).
 //!
 //! This module is the WASM *personality* of the crate: a thin, logic-free
-//! shell over the rlib verification core. Every export base64/text-marshals its
-//! arguments and delegates straight to [`crate::proof`], [`crate::checkpoint`],
+//! shell over the rlib core. Every export base64/text-marshals its arguments
+//! and delegates straight to [`crate::proof`], [`crate::checkpoint`],
 //! [`crate::note`], [`crate::coniks`], [`crate::commitment`], and
 //! [`crate::policy`]. It performs **no** Merkle, signature, VRF, or policy logic
 //! of its own — so the verifications it runs and the bytes it computes are
 //! identical to the native crate. The cross-language byte-parity KAT
 //! (`tests/cross_language.rs` + the `wasm-bindgen-test` suite) locks this.
+//!
+//! Alongside the original verification/monitor surface, this SDK also surfaces
+//! the **producer** helpers a browser client needs to sign its own C2SP
+//! artifacts: classical Ed25519 and additive hybrid PQ note signing
+//! ([`note_sign_ed25519`], [`note_sign_hybrid`]), a one-call checkpoint signer
+//! ([`checkpoint_sign_hybrid`]), verifier-key encoding ([`vkey_encode_hybrid`],
+//! [`vkey_encode_ed25519`]), and namespace-policy signing
+//! ([`signed_policy_sign`]). Secret keys never leave the audited
+//! metamorphic-crypto primitives; this layer only marshals base64/text.
 //!
 //! ## Conventions (matching the metamorphic-crypto WASM SDK)
 //!
@@ -31,14 +41,17 @@
 
 use wasm_bindgen::prelude::*;
 
-use crate::checkpoint::Checkpoint;
+use crate::checkpoint::{self, Checkpoint};
 use crate::commitment::{Commitment, Opening};
 use crate::coniks::{AbsenceProof, LookupProof, Namespace};
 use crate::directory::DirectoryBackendId;
 use crate::keytrans::{KeytransVerifier, KtSuite};
 use crate::leaf::key_history_v1::Entry;
-use crate::note::{SignedNote, VerifierKey};
-use crate::policy::{CommitmentHash, NamespacePolicy, SignedPolicy};
+use crate::note::{self, SignedNote, VerifierKey};
+use crate::policy::{
+    CheckpointSuite, CommitmentHash, DirectoryMode, KeytransSuite, NamespacePolicy, SecurityLevel,
+    SignedPolicy, VrfMode,
+};
 use crate::proof::{verify_consistency, verify_inclusion};
 use crate::vrf::{Ecvrf, VrfPublicKey};
 
@@ -246,6 +259,131 @@ pub fn checkpoint_verify_consistency(
     let proof = decode_proof(&proof_b64)?;
     older.verify_consistency(&newer, &proof).map_err(to_js)?;
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// C2SP note / checkpoint / vkey signing + encoding (producer helpers)
+// ---------------------------------------------------------------------------
+
+/// Sign UTF-8 `text` with an additive hybrid PQ composite secret key, returning
+/// the complete C2SP `signed-note` text (body + blank line + the hybrid
+/// signature line).
+///
+/// `text` must be the exact note body (ending in a newline). `name` is the
+/// C2SP key name; `secret_key_b64` is the base64 metamorphic-crypto composite
+/// secret key. The composite signs under the fixed internal hybrid context.
+/// Throws on an invalid name, an undecodable/underivable secret key, or a
+/// signing failure.
+#[wasm_bindgen(js_name = "noteSignHybrid")]
+pub fn note_sign_hybrid(
+    text: &str,
+    name: &str,
+    secret_key_b64: &str,
+) -> Result<String, JsValue> {
+    let sig = note::sign_hybrid(text, name, secret_key_b64).map_err(to_js)?;
+    let note = SignedNote::new(text.to_string(), vec![sig]).map_err(to_js)?;
+    Ok(note.marshal())
+}
+
+/// Sign UTF-8 `text` with a raw 32-byte Ed25519 seed, returning the complete
+/// classical (witness-compatible) C2SP `signed-note` text.
+///
+/// `text` must be the exact note body (ending in a newline). `name` is the
+/// C2SP key name; `seed_b64` is the base64 32-byte Ed25519 seed. Throws on an
+/// invalid name or a seed that is not 32 bytes.
+#[wasm_bindgen(js_name = "noteSignEd25519")]
+pub fn note_sign_ed25519(text: &str, name: &str, seed_b64: &str) -> Result<String, JsValue> {
+    let seed = decode(seed_b64)?;
+    let sig = note::sign_ed25519(text, name, &seed).map_err(to_js)?;
+    let note = SignedNote::new(text.to_string(), vec![sig]).map_err(to_js)?;
+    Ok(note.marshal())
+}
+
+/// Build a checkpoint body and sign it with a hybrid PQ composite secret key in
+/// one call, returning the complete C2SP `signed-note` text ready to publish.
+///
+/// `origin` is the log identity line; `size` the tree size; `root_b64` the
+/// base64 of the exactly 32-byte RFC 6962 root at `size`; `name` the C2SP key
+/// name (usually the origin); `secret_key_b64` the base64 composite secret key.
+/// Wraps [`crate::checkpoint::sign_checkpoint_hybrid`]. Throws on a malformed
+/// checkpoint (empty origin, non-32-byte root) or a signing failure.
+#[wasm_bindgen(js_name = "checkpointSignHybrid")]
+pub fn checkpoint_sign_hybrid(
+    origin: &str,
+    size: u64,
+    root_b64: &str,
+    name: &str,
+    secret_key_b64: &str,
+) -> Result<String, JsValue> {
+    checkpoint::sign_checkpoint_hybrid(origin, size, root_b64, name, secret_key_b64).map_err(to_js)
+}
+
+/// Encode a hybrid composite verifier key (`vkey`) from a key name and the
+/// metamorphic-crypto composite public key bytes (`tag || classical_pk ||
+/// ml_dsa_pk`, base64). The stored `namespace.public_signing_key` is exactly
+/// this composite public key. Returns the `<name>+<hex keyid>+<base64(type ||
+/// pubkey)>` string; throws on an invalid name or empty public key.
+#[wasm_bindgen(js_name = "vkeyEncodeHybrid")]
+pub fn vkey_encode_hybrid(name: &str, public_key_b64: &str) -> Result<String, JsValue> {
+    let public_key = decode(public_key_b64)?;
+    let vkey = VerifierKey::new_hybrid(name, &public_key).map_err(to_js)?;
+    Ok(vkey.encode())
+}
+
+/// Encode an Ed25519 verifier key (`vkey`) from a key name and 32-byte public
+/// key (base64). Returns the C2SP `vkey` string; throws on an invalid name or a
+/// public key that is not 32 bytes.
+#[wasm_bindgen(js_name = "vkeyEncodeEd25519")]
+pub fn vkey_encode_ed25519(name: &str, public_key_b64: &str) -> Result<String, JsValue> {
+    let public_key = decode(public_key_b64)?;
+    let vkey = VerifierKey::new_ed25519(name, &public_key).map_err(to_js)?;
+    Ok(vkey.encode())
+}
+
+/// Sign a namespace policy with a hybrid composite secret key, returning the
+/// canonical `SignedPolicy` envelope as base64 (the Layer-0 leaf).
+///
+/// This mirrors the [`signed_policy_verify`] posture surface: the declared
+/// axes are given as their canonical string tags (as emitted by
+/// [`signed_policy_verify`]). `prev_policy_hash_b64` is the base64 64-byte hash
+/// of the previous policy version, or `null`/omitted for a genesis policy;
+/// `secret_key_b64` is the namespace root composite secret key.
+///
+/// The `directory_mode` selects the CONIKS ([`NamespacePolicy::new`]) or
+/// KEYTRANS ([`NamespacePolicy::new_keytrans`]) constructor; `keytrans_suite`
+/// is only meaningful on the KEYTRANS route. Throws on an invalid tag, a
+/// well-formedness violation, or a signing failure.
+#[wasm_bindgen(js_name = "signedPolicySign")]
+#[allow(clippy::too_many_arguments)]
+pub fn signed_policy_sign(
+    namespace: &str,
+    policy_schema_version: u32,
+    security_level: &str,
+    checkpoint_suite: &str,
+    commitment_hash: &str,
+    vrf_mode: &str,
+    directory_mode: &str,
+    keytrans_suite: &str,
+    effective_from: u64,
+    created_at: u64,
+    prev_policy_hash_b64: Option<String>,
+    secret_key_b64: &str,
+) -> Result<String, JsValue> {
+    let policy = build_policy(
+        namespace,
+        policy_schema_version,
+        security_level,
+        checkpoint_suite,
+        commitment_hash,
+        vrf_mode,
+        directory_mode,
+        keytrans_suite,
+        effective_from,
+        created_at,
+        prev_policy_hash_b64,
+    )?;
+    let signed = SignedPolicy::sign(policy, secret_key_b64).map_err(to_js)?;
+    Ok(b64::encode(&signed.canonical_bytes()))
 }
 
 // ---------------------------------------------------------------------------
@@ -619,6 +757,138 @@ fn verified_policy(signed_b64: &str) -> Result<NamespacePolicy, JsValue> {
     let signed = SignedPolicy::parse(&decode(signed_b64)?).map_err(to_js)?;
     signed.verify().map_err(to_js)?;
     Ok(signed.policy().clone())
+}
+
+/// Normalize a JS enum tag: drop `_`/`-` separators and lowercase, so both the
+/// camelCase form emitted by [`signed_policy_verify`] (`"hybridMatched"`) and a
+/// snake_case form (`"hybrid_matched"`) parse identically.
+fn normalize_tag(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// Parse a JS security-level tag into a [`SecurityLevel`].
+fn parse_security_level(s: &str) -> Result<SecurityLevel, JsValue> {
+    match normalize_tag(s).as_str() {
+        "cat3" => Ok(SecurityLevel::Cat3),
+        "cat5" => Ok(SecurityLevel::Cat5),
+        other => Err(JsValue::from_str(&format!(
+            "invalid security level \"{other}\": expected \"cat3\" or \"cat5\""
+        ))),
+    }
+}
+
+/// Parse a JS checkpoint-suite tag into a [`CheckpointSuite`].
+fn parse_checkpoint_suite(s: &str) -> Result<CheckpointSuite, JsValue> {
+    match normalize_tag(s).as_str() {
+        "hybrid" => Ok(CheckpointSuite::Hybrid),
+        "hybridmatched" => Ok(CheckpointSuite::HybridMatched),
+        "purecnsa2" => Ok(CheckpointSuite::PureCnsa2),
+        other => Err(JsValue::from_str(&format!(
+            "invalid checkpoint suite \"{other}\": expected \"hybrid\", \"hybridMatched\", or \"pureCnsa2\""
+        ))),
+    }
+}
+
+/// Parse a JS VRF-mode tag into a [`VrfMode`].
+fn parse_vrf_mode(s: &str) -> Result<VrfMode, JsValue> {
+    match normalize_tag(s).as_str() {
+        "classical" => Ok(VrfMode::Classical),
+        "hybridoutput" => Ok(VrfMode::HybridOutput),
+        "purepqexperimental" => Ok(VrfMode::PurePqExperimental),
+        other => Err(JsValue::from_str(&format!(
+            "invalid vrf mode \"{other}\": expected \"classical\", \"hybridOutput\", or \"purePqExperimental\""
+        ))),
+    }
+}
+
+/// Parse a JS directory-mode tag into a [`DirectoryMode`].
+fn parse_directory_mode(s: &str) -> Result<DirectoryMode, JsValue> {
+    match normalize_tag(s).as_str() {
+        "coniks" => Ok(DirectoryMode::Coniks),
+        "keytrans" => Ok(DirectoryMode::Keytrans),
+        other => Err(JsValue::from_str(&format!(
+            "invalid directory mode \"{other}\": expected \"coniks\" or \"keytrans\""
+        ))),
+    }
+}
+
+/// Parse a JS KEYTRANS-suite tag into a [`KeytransSuite`].
+fn parse_keytrans_suite(s: &str) -> Result<KeytransSuite, JsValue> {
+    match normalize_tag(s).as_str() {
+        "metamorphichybridexp" => Ok(KeytransSuite::MetamorphicHybridExp),
+        "kt128sha256ed25519" => Ok(KeytransSuite::Kt128Sha256Ed25519),
+        "kt128sha256p256" => Ok(KeytransSuite::Kt128Sha256P256),
+        other => Err(JsValue::from_str(&format!(
+            "invalid keytrans suite \"{other}\": expected \"metamorphicHybridExp\", \"kt128Sha256Ed25519\", or \"kt128Sha256P256\""
+        ))),
+    }
+}
+
+/// Build + validate a [`NamespacePolicy`] from the JS posture surface, choosing
+/// the CONIKS or KEYTRANS constructor from `directory_mode`.
+#[allow(clippy::too_many_arguments)]
+fn build_policy(
+    namespace: &str,
+    policy_schema_version: u32,
+    security_level: &str,
+    checkpoint_suite: &str,
+    commitment_hash: &str,
+    vrf_mode: &str,
+    directory_mode: &str,
+    keytrans_suite: &str,
+    effective_from: u64,
+    created_at: u64,
+    prev_policy_hash_b64: Option<String>,
+) -> Result<NamespacePolicy, JsValue> {
+    let ns = Namespace::parse(namespace).map_err(to_js)?;
+    let level = parse_security_level(security_level)?;
+    let cp_suite = parse_checkpoint_suite(checkpoint_suite)?;
+    let commit = parse_commitment_hash(commitment_hash)?;
+    let vrf = parse_vrf_mode(vrf_mode)?;
+    let dir = parse_directory_mode(directory_mode)?;
+    let prev_hash = match prev_policy_hash_b64 {
+        Some(ref s) if !s.is_empty() => {
+            let bytes = decode(s)?;
+            Some(
+                <[u8; 64]>::try_from(bytes.as_slice())
+                    .map_err(|_| JsValue::from_str("prev_policy_hash must be 64 bytes"))?,
+            )
+        }
+        _ => None,
+    };
+    match dir {
+        DirectoryMode::Coniks => NamespacePolicy::new(
+            ns,
+            policy_schema_version,
+            level,
+            cp_suite,
+            commit,
+            vrf,
+            effective_from,
+            created_at,
+            prev_hash,
+        )
+        .map_err(to_js),
+        DirectoryMode::Keytrans => {
+            let kt_suite = parse_keytrans_suite(keytrans_suite)?;
+            NamespacePolicy::new_keytrans(
+                ns,
+                policy_schema_version,
+                level,
+                cp_suite,
+                commit,
+                vrf,
+                effective_from,
+                created_at,
+                prev_hash,
+                kt_suite,
+            )
+            .map_err(to_js)
+        }
+    }
 }
 
 /// Build a KEYTRANS relying-party verifier from the commitment context and the

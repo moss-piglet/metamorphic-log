@@ -28,7 +28,7 @@
 use crate::encoding::{base64_decode, base64_encode};
 use crate::error::{Error, Result};
 use crate::merkle::{HASH_LEN, Hash};
-use crate::note::{SignedNote, VerifierKey};
+use crate::note::{self, SignedNote, VerifierKey};
 use crate::proof;
 
 /// A parsed checkpoint (signed-tree-head body).
@@ -236,6 +236,52 @@ impl Checkpoint {
     }
 }
 
+/// Build a checkpoint body and sign it with a metamorphic-crypto hybrid
+/// composite secret key, returning the complete C2SP `signed-note` text (body +
+/// blank line + the additive PQ signature line) ready to publish.
+///
+/// This is the one-call convenience path for the common producer flow. It
+/// wraps [`Checkpoint::new`], [`Checkpoint::marshal`],
+/// [`crate::note::sign_hybrid`], [`SignedNote::new`], and
+/// [`SignedNote::marshal`] so a caller never has to hand-assemble the byte
+/// layout. `root_b64` is the base64 of the exactly 32-byte RFC 6962 root at
+/// `size`; `name` is the C2SP key name (the log origin); `secret_key_b64` is
+/// the base64 composite secret key (`tag || classical_seed || ml_dsa_seed`).
+/// The matching [`VerifierKey::new_hybrid`] (derived from the secret key's
+/// public half) verifies the produced note.
+///
+/// The returned note carries a single hybrid line. To co-sign the *same body*
+/// with an additional classical Ed25519 witness line, use the lower-level
+/// [`crate::note::sign_ed25519`] / [`SignedNote::new`] path with both
+/// signatures (see the `checkpoint_co_signed_classical_and_pq` flow).
+///
+/// # Errors
+/// Returns [`Error::MalformedCheckpoint`] if `origin`/`size`/`root_b64` do not
+/// form a valid checkpoint (empty origin, wrong-length root, non-base64 root),
+/// and propagates [`crate::note::sign_hybrid`] errors
+/// ([`Error::HybridSignature`] for an undecodable/underivable secret key or a
+/// signing failure, or [`Error::MalformedNote`] for an invalid `name`).
+pub fn sign_checkpoint_hybrid(
+    origin: &str,
+    size: u64,
+    root_b64: &str,
+    name: &str,
+    secret_key_b64: &str,
+) -> Result<String> {
+    let root_bytes = base64_decode(root_b64).map_err(|_| {
+        Error::MalformedCheckpoint(format!("root hash is not valid base64: {root_b64:?}"))
+    })?;
+    let root_hash: Hash = root_bytes.as_slice().try_into().map_err(|_| {
+        Error::MalformedCheckpoint(format!(
+            "root hash is {} bytes, want {HASH_LEN}",
+            root_bytes.len()
+        ))
+    })?;
+    let body = Checkpoint::new(origin, size, root_hash)?.marshal();
+    let sig = note::sign_hybrid(&body, name, secret_key_b64)?;
+    Ok(SignedNote::new(body, vec![sig])?.marshal())
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -356,5 +402,42 @@ mod tests {
         // A PQ-aware verifier with both trusted keys verifies the full set.
         let parsed_pq = Checkpoint::from_signed_note(&note.marshal(), &[ed_vkey, pq_vkey]).unwrap();
         assert_eq!(parsed_pq, cp);
+    }
+
+    #[test]
+    fn sign_checkpoint_hybrid_convenience_round_trips() {
+        let mut tree = MerkleTree::new();
+        for i in 0u32..10 {
+            tree.push(&i.to_be_bytes());
+        }
+        let root_b64 = crate::encoding::base64_encode(&tree.root());
+
+        let kp = metamorphic_crypto::generate_signing_keypair();
+        let pk = crate::encoding::base64_decode(&kp.public_key).unwrap();
+
+        // One call produces the full signed-note text.
+        let note_text = sign_checkpoint_hybrid(
+            "origin.example/log",
+            tree.size(),
+            &root_b64,
+            "origin.example/log",
+            &kp.secret_key,
+        )
+        .unwrap();
+
+        // The derived verifier key verifies the produced note and yields the
+        // expected head — identical to the hand-assembled path.
+        let vkey = VerifierKey::new_hybrid("origin.example/log", &pk).unwrap();
+        let parsed = Checkpoint::from_signed_note(&note_text, &[vkey]).unwrap();
+        let expected = Checkpoint::new("origin.example/log", tree.size(), tree.root()).unwrap();
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn sign_checkpoint_hybrid_rejects_bad_root() {
+        let kp = metamorphic_crypto::generate_signing_keypair();
+        // Root that is not 32 bytes once decoded.
+        let err = sign_checkpoint_hybrid("o", 1, "AAAA", "o", &kp.secret_key).unwrap_err();
+        assert!(matches!(err, Error::MalformedCheckpoint(_)));
     }
 }
