@@ -94,7 +94,24 @@ jobs:
       - name: Publish to crates.io
         # No --no-verify: re-build inside the publish step so crates.io ships
         # exactly what the tests above ran against.
-        run: cargo publish
+        #
+        # Idempotent by design: crates.io publishes are immutable and permanent,
+        # so a resumed/re-run release (e.g. a transient npm or GitHub Release
+        # failure downstream) must not hard-fail here just because the version is
+        # already on the index. We detect that one specific, safe condition and
+        # continue so the remaining steps (npm publish, GitHub Release) can finish
+        # a partially-completed release. Any other publish error still fails fast.
+        run: |
+          set +e
+          out="$(cargo publish 2>&1)"; code=$?
+          echo "${out}"
+          if [ "${code}" -ne 0 ]; then
+            if echo "${out}" | grep -q "already exists on crates.io"; then
+              echo "::warning::metamorphic-log ${GITHUB_REF_NAME#v} is already on crates.io; skipping publish and resuming the release (npm + GitHub Release)."
+            else
+              exit "${code}"
+            fi
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
 
@@ -170,7 +187,20 @@ jobs:
         # the workflow's OIDC identity and automatically attaches provenance
         # (the verified badge on npmjs.com). id-token: write is already granted.
         # One-time setup: npmjs.com → package Settings → Trusted Publisher.
-        run: npm publish --access public
+        #
+        # Idempotent for the same reason as the crates.io step above: a resumed
+        # release must not hard-fail if this version is already on the registry.
+        run: |
+          set +e
+          out="$(npm publish --access public 2>&1)"; code=$?
+          echo "${out}"
+          if [ "${code}" -ne 0 ]; then
+            if echo "${out}" | grep -qiE "cannot publish over|previously published|403"; then
+              echo "::warning::@f0rest8/metamorphic-log ${GITHUB_REF_NAME#v} is already on npm; skipping publish and resuming the release."
+            else
+              exit "${code}"
+            fi
+          fi
 
       # --- GitHub Release ---
       - name: Attach artifacts to GitHub Release
