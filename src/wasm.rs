@@ -275,11 +275,7 @@ pub fn checkpoint_verify_consistency(
 /// Throws on an invalid name, an undecodable/underivable secret key, or a
 /// signing failure.
 #[wasm_bindgen(js_name = "noteSignHybrid")]
-pub fn note_sign_hybrid(
-    text: &str,
-    name: &str,
-    secret_key_b64: &str,
-) -> Result<String, JsValue> {
+pub fn note_sign_hybrid(text: &str, name: &str, secret_key_b64: &str) -> Result<String, JsValue> {
     let sig = note::sign_hybrid(text, name, secret_key_b64).map_err(to_js)?;
     let note = SignedNote::new(text.to_string(), vec![sig]).map_err(to_js)?;
     Ok(note.marshal())

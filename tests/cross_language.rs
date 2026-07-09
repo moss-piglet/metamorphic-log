@@ -508,8 +508,14 @@ fn wasm_checkpoint_sign_hybrid_round_trips_through_sdk_verifier() {
     assert_eq!(get_str(&cp, "rootB64"), root_b64);
     // A non-32-byte root is rejected.
     assert!(
-        checkpoint_sign_hybrid("origin.example/log", 1, "AAAA", "origin.example/log", HYBRID_KAT_SK)
-            .is_err()
+        checkpoint_sign_hybrid(
+            "origin.example/log",
+            1,
+            "AAAA",
+            "origin.example/log",
+            HYBRID_KAT_SK
+        )
+        .is_err()
     );
 }
 
