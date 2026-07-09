@@ -425,3 +425,141 @@ fn wasm_signed_policy_verify_surfaces_directory_axes() {
     assert!(policy_enforce_directory_backend(KAT_SIGNED_B64.trim(), 0x0001).unwrap());
     assert!(policy_enforce_directory_backend(KAT_SIGNED_B64.trim(), 0xF004).is_err());
 }
+
+// --------------------------------------------------------------------------
+// 7. Producer helpers: note / checkpoint / vkey signing + encoding
+//
+//    ML-DSA signing is hedged so signature bytes are NOT reproducible; we lock
+//    the *round trip* instead — sign through the WASM SDK, derive the vkey, and
+//    prove the SDK verifier accepts the produced artifact (and rejects tampered
+//    / foreign-key inputs), byte-parity with the native producer path.
+// --------------------------------------------------------------------------
+
+// The deterministic composite public key for HYBRID_KAT_SK.
+fn kat_pk_b64() -> String {
+    metamorphic_crypto::derive_public_key(HYBRID_KAT_SK).unwrap()
+}
+
+#[wasm_bindgen_test]
+fn wasm_vkey_encode_hybrid_matches_native() {
+    let pk = metamorphic_crypto::b64::decode(&kat_pk_b64()).unwrap();
+    let expected = metamorphic_log::note::VerifierKey::new_hybrid("metamorphic.app/kat", &pk)
+        .unwrap()
+        .encode();
+    assert_eq!(
+        vkey_encode_hybrid("metamorphic.app/kat", &kat_pk_b64()).unwrap(),
+        expected
+    );
+    // An empty public key is rejected.
+    assert!(vkey_encode_hybrid("metamorphic.app/kat", &b64(&[])).is_err());
+}
+
+#[wasm_bindgen_test]
+fn wasm_vkey_encode_ed25519_matches_native() {
+    let (_seed, pk) = metamorphic_crypto::ed25519_generate_keypair();
+    let expected = metamorphic_log::note::VerifierKey::new_ed25519("origin.example/log", &pk)
+        .unwrap()
+        .encode();
+    assert_eq!(
+        vkey_encode_ed25519("origin.example/log", &b64(&pk)).unwrap(),
+        expected
+    );
+    // A non-32-byte key is rejected.
+    assert!(vkey_encode_ed25519("origin.example/log", &b64(&[0u8; 5])).is_err());
+}
+
+#[wasm_bindgen_test]
+fn wasm_note_sign_hybrid_round_trips_through_sdk_verifier() {
+    let text = "origin.example/log\n7\ncm9vdA==\n";
+    let note = note_sign_hybrid(text, "origin.example/log", HYBRID_KAT_SK).unwrap();
+    let vkey = vkey_encode_hybrid("origin.example/log", &kat_pk_b64()).unwrap();
+    assert_eq!(verify_signed_note(&note, vec![vkey]).unwrap(), 1);
+    // A foreign key (wrong name) is not trusted.
+    let foreign = vkey_encode_hybrid("foreign/log", &kat_pk_b64()).unwrap();
+    assert!(verify_signed_note(&note, vec![foreign]).is_err());
+}
+
+#[wasm_bindgen_test]
+fn wasm_note_sign_ed25519_round_trips_through_sdk_verifier() {
+    let (seed, pk) = metamorphic_crypto::ed25519_generate_keypair();
+    let text = "origin.example/log\n7\ncm9vdA==\n";
+    let note = note_sign_ed25519(text, "origin.example/log", &b64(&seed)).unwrap();
+    let vkey = vkey_encode_ed25519("origin.example/log", &b64(&pk)).unwrap();
+    assert_eq!(verify_signed_note(&note, vec![vkey]).unwrap(), 1);
+    // A bad seed length is rejected.
+    assert!(note_sign_ed25519(text, "origin.example/log", &b64(&[0u8; 5])).is_err());
+}
+
+#[wasm_bindgen_test]
+fn wasm_checkpoint_sign_hybrid_round_trips_through_sdk_verifier() {
+    let root_b64 = "q1bnDR7DLfXk0sCC5tD4hbsBLg7p+9Gd4tT8H9wYnKE=";
+    let note = checkpoint_sign_hybrid(
+        "origin.example/log",
+        10,
+        root_b64,
+        "origin.example/log",
+        HYBRID_KAT_SK,
+    )
+    .unwrap();
+    let vkey = vkey_encode_hybrid("origin.example/log", &kat_pk_b64()).unwrap();
+    let cp = checkpoint_verify(&note, vec![vkey]).unwrap();
+    assert_eq!(get_str(&cp, "origin"), "origin.example/log");
+    assert_eq!(get_f64(&cp, "size") as u64, 10);
+    assert_eq!(get_str(&cp, "rootB64"), root_b64);
+    // A non-32-byte root is rejected.
+    assert!(
+        checkpoint_sign_hybrid(
+            "origin.example/log",
+            1,
+            "AAAA",
+            "origin.example/log",
+            HYBRID_KAT_SK
+        )
+        .is_err()
+    );
+}
+
+#[wasm_bindgen_test]
+fn wasm_signed_policy_sign_round_trips_through_sdk_verifier() {
+    // Sign a fresh Cat-3 CONIKS-route genesis policy, then verify + enforce it
+    // back through the SDK.
+    let signed = signed_policy_sign(
+        "metamorphic.app",
+        1,
+        "cat3",
+        "hybrid",
+        "sha3_256",
+        "classical",
+        "coniks",
+        "metamorphicHybridExp",
+        0,
+        1_700_000_000,
+        None,
+        HYBRID_KAT_SK,
+    )
+    .unwrap();
+    let p = signed_policy_verify(&signed).unwrap();
+    assert_eq!(get_str(&p, "namespace"), "metamorphic.app");
+    assert_eq!(get_str(&p, "securityLevel"), "cat3");
+    assert_eq!(get_str(&p, "checkpointSuite"), "hybrid");
+    assert_eq!(get_str(&p, "directoryMode"), "coniks");
+    assert!(policy_enforce_commitment_hash(&signed, "sha3_256").unwrap());
+    // A malformed posture (PureCnsa2 below Cat-5) is rejected at build time.
+    assert!(
+        signed_policy_sign(
+            "metamorphic.app",
+            1,
+            "cat3",
+            "pureCnsa2",
+            "sha3_256",
+            "classical",
+            "coniks",
+            "metamorphicHybridExp",
+            0,
+            1_700_000_000,
+            None,
+            HYBRID_KAT_SK,
+        )
+        .is_err()
+    );
+}

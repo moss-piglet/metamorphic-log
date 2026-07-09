@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-07-08
+
+Surfaces the **signing (producer) layer** in the WASM SDK and adds a one-call
+checkpoint-signing convenience to the core, unblocking client-signed C2SP
+checkpoints in downstream consumers (mosskeys #38b). **Additive only** — no wire
+format, byte layout, or KAT changes; the CONIKS, policy-v1, `key_history_v1`,
+and RFC 6962 tlog conformance vectors are byte-for-byte unchanged, and every
+existing verification/monitor export is untouched.
+
+### Added
+
+- `checkpoint::sign_checkpoint_hybrid(origin, size, root_b64, name, sk)` — the
+  one-call producer path that builds a checkpoint body and returns the complete
+  signed-note text, sharing the `Checkpoint::new` + `note::sign_hybrid` +
+  `SignedNote` code path (no new byte layout).
+- WASM SDK producer helpers (thin, logic-free shells over the existing core
+  signing primitives): `noteSignHybrid`, `noteSignEd25519`,
+  `checkpointSignHybrid`, `vkeyEncodeHybrid`, `vkeyEncodeEd25519`, and
+  `signedPolicySign` (mirrors the `signedPolicyVerify` posture surface, via
+  `NamespacePolicy::new` / `new_keytrans` + `SignedPolicy::sign`).
+- `wasm-bindgen-test` round-trip coverage for all new producer helpers (sign →
+  derive vkey → SDK-verify, plus tampered / foreign-key / malformed-input
+  rejection). ML-DSA signing is hedged, so bytes are not reproducible; the tests
+  lock the round trip, not regenerated signature bytes.
+
+The fixed C2SP hybrid note context (`HYBRID_SIG_CONTEXT`) remains an internal,
+non-customizable interop invariant.
+
 ## [0.1.6] - 2026-07-08
 
 Supply-chain bump: `metamorphic-crypto` 0.10.0 → 0.10.2, propagating the
