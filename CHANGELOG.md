@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-07-09
+
+Release-plumbing patch. **No library changes** — the crate source, wire
+formats, byte layouts, and all conformance vectors are byte-for-byte identical
+to 0.1.7.
+
+The 0.1.7 release run published to crates.io but then aborted at that step on a
+resumed run (`crate ... already exists on crates.io index`), leaving npm and the
+GitHub Release unpublished. This release ships the fix and completes the npm +
+GitHub Release artifacts.
+
+### Changed
+
+- CI: the crates.io and npm publish steps in the release workflow are now
+  idempotent — a resumed/re-run release detects an already-published version,
+  warns, and continues so the remaining steps (npm, GitHub Release) finish
+  instead of aborting a half-published release. Any other publish error still
+  fails fast.
+
 ## [0.1.7] - 2026-07-08
 
 Surfaces the **signing (producer) layer** in the WASM SDK and adds a one-call
