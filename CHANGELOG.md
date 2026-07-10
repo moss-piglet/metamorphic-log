@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-07-09
+
+Supply-chain bump. **No library changes** — crate source, wire formats, byte
+layouts, and all conformance vectors are byte-for-byte identical to 0.1.9.
+
+### Changed
+
+- Bump `metamorphic-crypto` dependency from 0.10.2 to 0.10.5. This pulls in the
+  upstream ML-DSA signing-stack hardening (a shared native `on_signing_stack`
+  guard and an 8 MiB WASM shadow-stack linker bump) at the primitives layer.
+  `sign_hybrid` continues to delegate directly to `metamorphic_crypto::sign` and
+  remains a pure function with no behavioural change.
+
 ## [0.1.9] - 2026-07-09
 
 Release-plumbing patch. **No library changes** — crate source, wire formats,
