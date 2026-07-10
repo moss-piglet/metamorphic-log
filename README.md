@@ -37,9 +37,9 @@ verification (Ed25519 + hybrid PQ), CONIKS `coniksVerifyLookup` /
 `policyEnforce*` checks. A **cross-language byte-parity KAT**
 (`tests/cross_language.rs`, run under `wasm-pack test --node`) proves the WASM
 exports reproduce the native KAT vectors byte-for-byte. The Elixir NIF
-(`metamorphic_log`, Rustler + dirty schedulers) is a deferred follow-up in its
-own sibling Hex package, mirroring the `metamorphic_crypto` precedent of a thin
-NIF over the published crate.
+(`metamorphic_log`, Rustler + dirty schedulers) ships in its own sibling Hex
+package, mirroring the `metamorphic_crypto` precedent of a thin NIF over the
+published crate.
 
 ## Verifying proofs
 
@@ -172,7 +172,7 @@ It does **not** solve:
 - `#![forbid(unsafe_code)]` at this layer
 - RustCrypto-only dependencies; primitives delegated to `metamorphic-crypto`
 - Edition 2024, MSRV 1.85, dual-licensed `MIT OR Apache-2.0`
-- CI runs `fmt --check`, `clippy -D warnings`, tests, a `wasm32-unknown-unknown`
+- CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, tests, a `wasm32-unknown-unknown`
   check, a `wasm-pack` SDK build, the cross-language byte-parity KAT
   (`wasm-pack test --node`), `cargo audit`, and an MSRV-floor build; all action
   refs are SHA-pinned. The tagged release pipeline adds CycloneDX SBOM, cosign
