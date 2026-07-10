@@ -19,6 +19,14 @@ layouts, and all conformance vectors are byte-for-byte identical to 0.1.9.
   `sign_hybrid` continues to delegate directly to `metamorphic_crypto::sign` and
   remains a pure function with no behavioural change.
 
+### Documentation
+
+- README: correct the CI lint command to the copy-pasteable
+  `cargo clippy --all-targets -- -D warnings` (the `-D warnings` lint level must
+  follow the `--` separator), and update the WASM-SDK section to reflect that the
+  Elixir NIF (`metamorphic_log`) now ships rather than being a deferred
+  follow-up.
+
 ## [0.1.9] - 2026-07-09
 
 Release-plumbing patch. **No library changes** — crate source, wire formats,
