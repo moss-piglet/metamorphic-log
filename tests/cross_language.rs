@@ -143,6 +143,49 @@ fn wasm_key_history_v1_entry_hash_matches_native_kat() {
 }
 
 #[wasm_bindgen_test]
+fn wasm_key_history_entry_hash_with_context_matches_and_brands() {
+    // Frozen mosslet label via the branded export reproduces the KAT digest…
+    let frozen = key_history_entry_hash_with_context(
+        "mosslet/key-history/v1",
+        0,
+        GENESIS_TS,
+        &b64(&x_a()),
+        &b64(&pq_a()),
+        &b64(&sp_fixed()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(frozen, KAT_GENESIS_HASH_B64);
+
+    // …and a mosskeys label brands the leaf to a different entry hash.
+    let branded = key_history_entry_hash_with_context(
+        "mosskeys/key-history/v1",
+        0,
+        GENESIS_TS,
+        &b64(&x_a()),
+        &b64(&pq_a()),
+        &b64(&sp_fixed()),
+        None,
+    )
+    .unwrap();
+    assert_ne!(branded, KAT_GENESIS_HASH_B64);
+
+    // Invalid labels are rejected.
+    assert!(
+        key_history_entry_hash_with_context(
+            "not-a-valid-label",
+            0,
+            GENESIS_TS,
+            &b64(&x_a()),
+            &b64(&pq_a()),
+            &b64(&sp_fixed()),
+            None,
+        )
+        .is_err()
+    );
+}
+
+#[wasm_bindgen_test]
 fn wasm_key_history_v1_rfc6962_leaf_hash_matches_native_kat() {
     let got = key_history_v1_rfc6962_leaf_hash(
         0,

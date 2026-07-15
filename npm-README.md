@@ -75,13 +75,13 @@ verifyInclusion(index, size, leafHashB64, proofB64Array, rootB64);
 verifyConsistency(size1, size2, proofB64Array, root1B64, root2B64);
 ```
 
-### Layer-0 leaf: `mosslet/key-history/v1`
+### Layer-0 leaf: key history
 
 ```js
 import {
   keyHistoryV1CanonicalBytes,
-  keyHistoryV1EntryHash,
   keyHistoryV1Rfc6962LeafHash,
+  keyHistoryEntryHashWithContext,
 } from "@f0rest8/metamorphic-log";
 
 // Pass an absent/empty prevEntryHash for the genesis entry.
@@ -89,7 +89,21 @@ const leafHash = keyHistoryV1Rfc6962LeafHash(
   seq, tsMs, encX25519B64, encPqB64, signingPubB64, prevEntryHashB64,
 );
 // Feed leafHash straight into verifyInclusion().
+
+// Recommended: brand the intra-chain entry hash with your own namespace label
+// so auditors can tell whose key history a chain belongs to. The canonical
+// bytes and RFC 6962 leaf hash above are brand-independent; only this hash
+// varies by label.
+const entryHash = keyHistoryEntryHashWithContext(
+  "acme/key-history/v1",
+  seq, tsMs, encX25519B64, encPqB64, signingPubB64, prevEntryHashB64,
+);
 ```
+
+The frozen `keyHistoryV1EntryHash(...)` (the `mosslet/key-history/v1`
+conformance value) is retained for backwards compatibility, but new
+applications should brand their leaves via `keyHistoryEntryHashWithContext`.
+
 
 ### Checkpoints + signed notes (Ed25519 + hybrid PQ)
 

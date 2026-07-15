@@ -6,6 +6,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-07-15
+
+Additive, non-breaking. Exposes a **context-parameterized key-history entry
+hash** so any application can brand its key-history leaves with its own
+`<namespace>/key-history/v1` label through this crate's audited byte discipline,
+instead of hand-rolling the hash or dropping to `metamorphic-crypto`. The frozen
+`mosslet/key-history/v1` conformance instance and all its cross-language KATs are
+byte-for-byte unchanged.
+
+### Added
+
+- `key_history_v1::Entry::entry_hash_with_context(&ContextLabel)` — the branded
+  intra-chain entry hash, `sha3_512_with_context(label, canonical_bytes)`. This
+  is now the **recommended** entry point for applications other than the frozen
+  Mosslet fixture. `Entry::entry_hash()` is retained and now delegates to it with
+  the frozen `CONTEXT`, proving equivalence.
+- `key_history_v1::key_history_entry_hash_with_context(&ContextLabel, &Entry)` —
+  free-function form of the above.
+- WASM: `keyHistoryEntryHashWithContext(context, seq, ts_ms, enc_x25519_b64,
+  enc_pq_b64, signing_pub_b64, prev?)` — mirrors `keyHistoryV1EntryHash` but takes
+  a `context` label first (parsed via `ContextLabel`), so browser clients can
+  brand their leaves too. `keyHistoryV1EntryHash` is unchanged.
+- KATs: the frozen label reproduces the locked digest via the new API, while a
+  second label (`mosskeys/key-history/v1`) yields a different `entry_hash` even
+  though the canonical bytes and RFC 6962 leaf hash are identical — native and
+  WASM.
+
+### Documentation
+
+- README + module docs recommend branding key-history leaves with your own
+  namespace label via `entry_hash_with_context` /
+  `keyHistoryEntryHashWithContext`, clarifying that the label binds the
+  domain separator so auditors can tell whose key history a chain belongs to.
+
 ## [0.1.10] - 2026-07-09
 
 Supply-chain bump. **No library changes** — crate source, wire formats, byte

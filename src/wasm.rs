@@ -46,6 +46,7 @@ use crate::commitment::{Commitment, Opening};
 use crate::coniks::{AbsenceProof, LookupProof, Namespace};
 use crate::directory::DirectoryBackendId;
 use crate::keytrans::{KeytransVerifier, KtSuite};
+use crate::leaf::ContextLabel;
 use crate::leaf::key_history_v1::Entry;
 use crate::note::{self, SignedNote, VerifierKey};
 use crate::policy::{
@@ -154,6 +155,42 @@ pub fn key_history_v1_entry_hash(
         prev_entry_hash_b64,
     )?;
     Ok(b64::encode(&entry.entry_hash().map_err(to_js)?))
+}
+
+/// Compute the SHA3-512 (context-bound) intra-chain entry hash of a key-history
+/// entry under a caller-supplied `context` label, letting any application brand
+/// its leaves with its own `<namespace>/key-history/v1` namespace.
+///
+/// This is the **recommended** entry-hash export for applications other than
+/// the frozen Mosslet fixture: pass your own label (e.g.
+/// `"acme/key-history/v1"`) as `context` so the domain separator reflects where
+/// the entry comes from. The canonical bytes and RFC 6962 leaf hash are
+/// brand-independent (reuse [`key_history_v1_canonical_bytes`] /
+/// [`key_history_v1_rfc6962_leaf_hash`] unchanged); only this entry hash varies
+/// by label. Returns the 64-byte digest as base64. Throws if `context` is not a
+/// valid `<namespace>/<record-type>/v<N>` label.
+#[wasm_bindgen(js_name = "keyHistoryEntryHashWithContext")]
+pub fn key_history_entry_hash_with_context(
+    context: &str,
+    seq: u64,
+    ts_ms: u64,
+    enc_x25519_b64: &str,
+    enc_pq_b64: &str,
+    signing_pub_b64: &str,
+    prev_entry_hash_b64: Option<String>,
+) -> Result<String, JsValue> {
+    let label = ContextLabel::parse(context).map_err(to_js)?;
+    let entry = build_entry(
+        seq,
+        ts_ms,
+        enc_x25519_b64,
+        enc_pq_b64,
+        signing_pub_b64,
+        prev_entry_hash_b64,
+    )?;
+    Ok(b64::encode(
+        &entry.entry_hash_with_context(&label).map_err(to_js)?,
+    ))
 }
 
 /// Compute the RFC 6962 leaf hash (`SHA-256(0x00 || canonical)`) of a
