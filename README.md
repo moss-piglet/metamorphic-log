@@ -62,6 +62,19 @@ versioned context label (`"acme/user-keys/v1"`, `"example-app/audit-event/v2"`,
 `metamorphic_log::leaf::key_history_v1` module is a worked example of such a
 record type (and the byte-locked conformance fixture); model your own on it.
 
+For the common **key-history** shape specifically, you do not need to hand-roll
+the hash: build a `key_history_v1::Entry` and call
+`entry.entry_hash_with_context(&label)` (or the free
+`key_history_entry_hash_with_context(&label, &entry)`) with your own
+`"<namespace>/key-history/v1"` label. This is the **recommended** way to produce
+a branded key-history leaf — the label binds the intra-chain domain separator to
+your namespace, so auditors can tell whose key history a chain belongs to. The
+canonical bytes and the RFC 6962 leaf hash are brand-independent; only the
+continuity `entry_hash` varies by label. The frozen `entry_hash()` (the
+`mosslet/key-history/v1` conformance value) is retained and simply delegates to
+`entry_hash_with_context` with that fixed label. In the browser SDK the matching
+export is `keyHistoryEntryHashWithContext(context, …)`.
+
 ## Index privacy (CONIKS)
 
 A `coniks::ConiksDirectory` maps identities to committed values at

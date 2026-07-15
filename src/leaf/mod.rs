@@ -192,6 +192,17 @@ fn push_lp(out: &mut Vec<u8>, bytes: &[u8]) {
 /// `test/mosslet/crypto/key_history_test.exs`). A real key-history row is a
 /// valid leaf with **zero reformatting**. Other applications define their own
 /// record types against the same fixed byte discipline.
+///
+/// ## Branding your own key history (recommended)
+///
+/// Most applications should **not** reuse the frozen `mosslet/key-history/v1`
+/// label. Instead, build the same [`Entry`] and call
+/// [`Entry::entry_hash_with_context`] (or the free
+/// [`key_history_entry_hash_with_context`]) with your own
+/// `<namespace>/key-history/v1` label. This binds the intra-chain domain
+/// separator to your namespace, so auditors can tell whose key history a chain
+/// belongs to. The canonical bytes and the RFC 6962 leaf hash are identical
+/// across labels — only the continuity `entry_hash` changes.
 pub mod key_history_v1 {
     use super::{ContextLabel, Error, Result, content_hash, push_lp};
     use crate::merkle::{Hash, hash_leaf};
@@ -276,12 +287,58 @@ pub mod key_history_v1 {
         /// Layer-0 leaf bytes the RFC 6962 leaf hash consumes. The next entry
         /// chains to this digest via `prev_entry_hash`.
         ///
+        /// This is the frozen `mosslet/key-history/v1` conformance value. New
+        /// applications should instead brand their own leaves with
+        /// [`Entry::entry_hash_with_context`], passing their own
+        /// `<namespace>/key-history/v1` label so the domain separator reflects
+        /// where the entry comes from (see the module docs). This function is
+        /// exactly `self.entry_hash_with_context(&ContextLabel::parse(CONTEXT)?)`.
+        ///
         /// # Errors
         /// Propagates [`Entry::canonical_bytes`] errors.
         pub fn entry_hash(&self) -> Result<[u8; 64]> {
+            self.entry_hash_with_context(&ContextLabel::parse(CONTEXT)?)
+        }
+
+        /// Compute the intra-chain `entry_hash` (64-byte SHA3-512) under a
+        /// caller-supplied [`ContextLabel`], letting any application brand its
+        /// key-history leaves with its own namespace.
+        ///
+        /// ```text
+        /// entry_hash = sha3_512_with_context(label, canonical_bytes)
+        /// ```
+        ///
+        /// This is the **recommended** entry point for applications other than
+        /// the frozen Mosslet fixture: pass your own label (for example
+        /// `"acme/key-history/v1"`) so the domain separator — and therefore the
+        /// continuity chain — is bound to your namespace, and third parties can
+        /// tell whose key history they are auditing. The canonical bytes and the
+        /// RFC 6962 leaf hash are brand-independent, so only the intra-chain
+        /// `entry_hash` differs between labels.
+        ///
+        /// ```
+        /// use metamorphic_log::leaf::{ContextLabel, key_history_v1::Entry};
+        ///
+        /// let entry = Entry {
+        ///     seq: 0,
+        ///     ts_ms: 1_700_000_000_000,
+        ///     enc_x25519: vec![1; 32],
+        ///     enc_pq: vec![2; 1184],
+        ///     signing_pub: vec![3; 32],
+        ///     prev_entry_hash: None,
+        /// };
+        /// let label = ContextLabel::parse("acme/key-history/v1").unwrap();
+        /// let branded = entry.entry_hash_with_context(&label).unwrap();
+        /// // A different label yields a different entry hash…
+        /// assert_ne!(branded, entry.entry_hash().unwrap());
+        /// // …while the canonical bytes are identical.
+        /// ```
+        ///
+        /// # Errors
+        /// Propagates [`Entry::canonical_bytes`] errors.
+        pub fn entry_hash_with_context(&self, label: &ContextLabel) -> Result<[u8; 64]> {
             let canonical = self.canonical_bytes()?;
-            let label = ContextLabel::parse(CONTEXT)?;
-            Ok(content_hash(&label, &canonical))
+            Ok(content_hash(label, &canonical))
         }
 
         /// Compute the RFC 6962 Merkle leaf hash `SHA-256(0x00 || canonical)`
@@ -295,5 +352,18 @@ pub mod key_history_v1 {
         pub fn rfc6962_leaf_hash(&self) -> Result<Hash> {
             Ok(hash_leaf(&self.canonical_bytes()?))
         }
+    }
+
+    /// Free-function form of [`Entry::entry_hash_with_context`], for callers who
+    /// prefer a top-level helper. Computes the branded intra-chain entry hash of
+    /// `entry` under `label`.
+    ///
+    /// # Errors
+    /// Propagates [`Entry::canonical_bytes`] errors.
+    pub fn key_history_entry_hash_with_context(
+        label: &ContextLabel,
+        entry: &Entry,
+    ) -> Result<[u8; 64]> {
+        entry.entry_hash_with_context(label)
     }
 }

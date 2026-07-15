@@ -176,6 +176,54 @@ fn key_history_v1_context_separation() {
     assert_ne!(b64::encode(&other_digest), KAT_GENESIS_HASH_B64);
 }
 
+#[test]
+fn entry_hash_with_context_matches_frozen_mosslet_label() {
+    // The branded entry point, given the frozen label, reproduces the frozen
+    // entry_hash() digest byte-for-byte (proves entry_hash() delegates safely).
+    use metamorphic_log::leaf::{ContextLabel, key_history_v1::CONTEXT};
+    let label = ContextLabel::parse(CONTEXT).unwrap();
+    let genesis = genesis_entry();
+    assert_eq!(
+        genesis.entry_hash_with_context(&label).unwrap(),
+        genesis.entry_hash().unwrap()
+    );
+    assert_eq!(
+        b64::encode(&genesis.entry_hash_with_context(&label).unwrap()),
+        KAT_GENESIS_HASH_B64
+    );
+}
+
+#[test]
+fn entry_hash_with_context_brands_leaf_without_changing_canonical_or_leaf_hash() {
+    // A different namespace (mosskeys) yields a DIFFERENT entry_hash while the
+    // canonical bytes and the RFC 6962 leaf hash are IDENTICAL — the whole
+    // point of Option B branding.
+    use metamorphic_log::leaf::{
+        ContextLabel, content_hash, key_history_v1::key_history_entry_hash_with_context,
+    };
+    let genesis = genesis_entry();
+    let mosskeys = ContextLabel::parse("mosskeys/key-history/v1").unwrap();
+
+    let branded = genesis.entry_hash_with_context(&mosskeys).unwrap();
+    // Frozen mosslet digest is unchanged; branded differs.
+    assert_ne!(b64::encode(&branded), KAT_GENESIS_HASH_B64);
+
+    // Free-fn form is equivalent to the method.
+    assert_eq!(
+        branded,
+        key_history_entry_hash_with_context(&mosskeys, &genesis).unwrap()
+    );
+    // And equivalent to hashing canonical bytes directly under the label.
+    let canonical = genesis.canonical_bytes().unwrap();
+    assert_eq!(branded, content_hash(&mosskeys, &canonical));
+
+    // Canonical bytes + RFC 6962 leaf hash are brand-independent.
+    assert_eq!(
+        genesis.rfc6962_leaf_hash().unwrap().to_vec(),
+        hex_decode(KAT_GENESIS_RFC6962_LEAF_HEX)
+    );
+}
+
 // ===========================================================================
 // 2. RFC 6962 / RFC 9162 reference vectors (transparency-dev/merkle corpus,
 //    the standard 8-leaf tree). Hashes are base64 as in the upstream testdata.
