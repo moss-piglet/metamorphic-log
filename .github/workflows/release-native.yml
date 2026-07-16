@@ -27,9 +27,11 @@ name: Release (native)
 #
 # Third-party actions are pinned to a full commit SHA (SLSA L3 / federal
 # supply-chain requirement); pins mirror release.yml where shared. Build tools
-# (maturin, cargo-ndk, cargo-cyclonedx, cargo-audit, ziglang) are installed from
+# (maturin, cargo-ndk, cargo-cyclonedx, cargo-audit) are installed from
 # locked sources (cargo install --locked / pinned pip versions) rather than
 # unpinned marketplace actions, so the toolchain supply chain stays verifiable.
+# manylinux wheels build inside PyO3/maturin-action's manylinux container
+# (pinned by SHA) so the compiled cdylib keeps its UniFFI metadata section.
 
 on:
   push:
@@ -54,7 +56,6 @@ env:
   # Pinned build tooling (single point to bump; installed via cargo/pip from
   # locked sources rather than unpinned actions).
   MATURIN_VERSION: "1.8.2"
-  ZIGLANG_VERSION: "0.13.0"
   CARGO_NDK_VERSION: "3.5.4"
 
 jobs:
@@ -115,9 +116,11 @@ jobs:
         run: cargo audit
 
   # --------------------------------------------------------------------------
-  # python: maturin uniffi wheels. uniffi Python bindings are pure Python that
-  # load the compiled cdylib via ctypes, so one wheel per platform is portable
-  # across CPython versions (no per-python-version matrix needed).
+  # python (native runners): maturin uniffi wheels on macOS + Windows, where the
+  # cdylib is built natively so the UniFFI metadata section survives. uniffi
+  # Python bindings are pure Python that load the compiled cdylib via ctypes, so
+  # one wheel per platform is portable across CPython versions (no per-python
+  # matrix needed). manylinux wheels are built separately in python-manylinux.
   # --------------------------------------------------------------------------
   python-build:
     name: Python wheel (${{ matrix.wheel }})
@@ -133,11 +136,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, wheel: manylinux-x86_64, zig: true, sdist: true }
-          - { runner: ubuntu-latest, target: aarch64-unknown-linux-gnu, wheel: manylinux-aarch64, zig: true, sdist: false }
-          - { runner: macos-14, target: aarch64-apple-darwin, wheel: macos-arm64, zig: false, sdist: false }
-          - { runner: macos-15-intel, target: x86_64-apple-darwin, wheel: macos-x86_64, zig: false, sdist: false }
-          - { runner: windows-latest, target: x86_64-pc-windows-msvc, wheel: windows-x86_64, zig: false, sdist: false }
+          - { runner: macos-14, target: aarch64-apple-darwin, wheel: macos-arm64 }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, wheel: macos-x86_64 }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, wheel: windows-x86_64 }
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -156,25 +157,10 @@ jobs:
       - name: Install uniffi-bindgen
         run: cargo install --path tools/uniffi-bindgen
 
-      # manylinux cross builds use maturin's zig backend for a portable glibc
-      # baseline (arm64 too) without a per-arch container.
-      - name: Install ziglang (zig cross builds)
-        if: matrix.zig
-        run: python3 -m pip install --user "ziglang==${ZIGLANG_VERSION}"
-
       - name: Build wheel
         working-directory: native/python
         shell: bash
-        run: |
-          out="${GITHUB_WORKSPACE}/dist"
-          zig=""
-          if [ "${{ matrix.zig }}" = "true" ]; then zig="--zig"; fi
-          maturin build --release --target "${{ matrix.target }}" ${zig} --out "${out}"
-
-      - name: Build sdist
-        if: matrix.sdist
-        working-directory: native/python
-        run: maturin sdist --out "${GITHUB_WORKSPACE}/dist"
+        run: maturin build --release --target "${{ matrix.target }}" --out "${GITHUB_WORKSPACE}/dist"
 
       # --- SBOM (CycloneDX) from Cargo.lock: the exact tree the cdylib was
       #     built from. One per matrix leg, suffixed to avoid collisions on the
@@ -201,24 +187,23 @@ jobs:
         working-directory: dist
         shell: bash
         run: |
-          for f in *.whl *.tar.gz sbom-python-*.json; do
+          for f in *.whl sbom-python-*.json; do
             [ -e "$f" ] || continue
             cosign sign-blob --yes --bundle "${f}.cosign.bundle" "$f"
           done
 
+      # Native legs only produce a wheel (the sdist is built once on the
+      # manylinux leg), so the attest subject is just the wheel.
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: |
-            dist/*.whl
-            dist/*.tar.gz
+          subject-path: dist/*.whl
 
       - name: Attach artifacts to GitHub Release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           files: |
             dist/*.whl
-            dist/*.tar.gz
             dist/sbom-python-${{ matrix.wheel }}.json
             dist/SHA512SUMS-python-${{ matrix.wheel }}
             dist/*.cosign.bundle
@@ -229,6 +214,112 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: python-dist-${{ matrix.wheel }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # python-manylinux: build the portable Linux wheels (x86_64 + aarch64) inside
+  # PyO3/maturin-action's manylinux container. The earlier `maturin --zig` path
+  # produced a cdylib whose UniFFI metadata section was dropped by the zig
+  # linker ("No UniFFI metadata found"); building in a real manylinux toolchain
+  # keeps the metadata intact. before-script-linux installs the standalone
+  # uniffi-bindgen inside the container so maturin's uniffi mode finds it on
+  # PATH. The single Linux x86_64 leg also builds the sdist.
+  # --------------------------------------------------------------------------
+  python-manylinux:
+    name: Python wheel (manylinux-${{ matrix.arch }})
+    needs: guard
+    runs-on: ubuntu-latest
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, target: x86_64-unknown-linux-gnu, sdist: true }
+          - { arch: aarch64, target: aarch64-unknown-linux-gnu, sdist: false }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Build manylinux wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: ${{ matrix.target }}
+          manylinux: "2_28"
+          working-directory: native/python
+          # The standalone generator must exist on PATH inside the container;
+          # maturin's uniffi mode shells out to it and does not forward cargo
+          # --features. Path is relative to working-directory (native/python).
+          before-script-linux: cargo install --path ../../tools/uniffi-bindgen
+          args: --release --out ../../dist
+
+      - name: Build sdist
+        if: matrix.sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          working-directory: native/python
+          args: --out ../../dist
+
+      # Host-side supply-chain steps (the wheels are already on the runner FS).
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate SBOM
+        run: |
+          cargo cyclonedx --format json --override-filename sbom
+          cp sbom.json "dist/sbom-python-manylinux-${{ matrix.arch }}.json"
+
+      - name: Compute SHA-512 checksums
+        working-directory: dist
+        run: sha512sum -- * > "SHA512SUMS-python-manylinux-${{ matrix.arch }}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign artifacts with cosign
+        working-directory: dist
+        run: |
+          for f in *.whl *.tar.gz sbom-python-*.json; do
+            [ -e "$f" ] || continue
+            cosign sign-blob --yes --bundle "${f}.cosign.bundle" "$f"
+          done
+
+      # x86_64 leg attests the wheel + sdist; aarch64 attests just the wheel.
+      - name: Attest build provenance (wheel + sdist)
+        if: matrix.sdist
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+
+      - name: Attest build provenance (wheel)
+        if: ${{ !matrix.sdist }}
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/*.whl
+
+      - name: Attach artifacts to GitHub Release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/sbom-python-manylinux-${{ matrix.arch }}.json
+            dist/SHA512SUMS-python-manylinux-${{ matrix.arch }}
+            dist/*.cosign.bundle
+          fail_on_unmatched_files: false
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-dist-manylinux-${{ matrix.arch }}
           path: |
             dist/*.whl
             dist/*.tar.gz
@@ -238,7 +329,7 @@ jobs:
   # once the PyPI Trusted Publisher is configured (see the handoff commands).
   python-publish:
     name: Publish to PyPI (gated)
-    needs: python-build
+    needs: [python-build, python-manylinux]
     if: vars.PUBLISH_PYPI == 'true'
     runs-on: ubuntu-latest
     environment: release
