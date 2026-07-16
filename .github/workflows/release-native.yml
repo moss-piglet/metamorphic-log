@@ -396,6 +396,12 @@ jobs:
           cd "$work"
           git checkout -b "$branch"
 
+          # Refresh the generated Swift wrapper so the package builds for
+          # consumers (the binaryTarget provides the compiled framework; this
+          # provides the Swift API surface bound to it).
+          mkdir -p Sources/MetamorphicLog
+          cp "${GITHUB_WORKSPACE}/bindings/swift/metamorphic_log.swift" Sources/MetamorphicLog/
+
           python3 - "$url" "$CHECKSUM" "$VERSION" <<'PY'
           import re, sys, pathlib
           url, checksum, version = sys.argv[1], sys.argv[2], sys.argv[3]
