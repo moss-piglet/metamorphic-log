@@ -617,12 +617,30 @@ jobs:
             -o native/android/library/src/main/jniLibs \
             build --release --features uniffi
 
+      # upload-artifact flattens `jni/<platform>/*` down to a bare library file
+      # (the artifact root is the least-common-ancestor of the matched files),
+      # so the JNA platform prefix is carried by the artifact NAME instead
+      # (jvm-jni-<platform>). Download without merge so each lands in its own
+      # jvm-jni-<platform>/ dir, then rebuild the JNA resource layout
+      # resources/<platform>/<lib> that JNA loads at runtime. Merging flat would
+      # collide the two macOS dylibs (arm64 + x86_64) and lose the platform dirs.
       - name: Download desktop JVM libs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: jvm-jni-*
-          path: native/android/jvm/src/main/resources
-          merge-multiple: true
+          path: jvm-libs
+
+      - name: Stage desktop libs into JNA resource layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="native/android/jvm/src/main/resources"
+          for d in jvm-libs/jvm-jni-*; do
+            platform="${d#jvm-libs/jvm-jni-}"
+            mkdir -p "${dest}/${platform}"
+            cp "${d}"/* "${dest}/${platform}/"
+          done
+          find "${dest}" -type f | sort
 
       - name: Build AAR + JVM jar
         working-directory: native/android
