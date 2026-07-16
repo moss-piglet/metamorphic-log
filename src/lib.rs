@@ -261,5 +261,21 @@ pub mod vrf;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
+/// Native **verification** SDK via UniFFI (Swift/Kotlin/Python), opt-in behind
+/// the `uniffi` cargo feature.
+///
+/// Like [`wasm`], a thin, logic-free personality over the rlib core: every
+/// export marshals `Vec<u8>` / `String` at the boundary and delegates straight
+/// to the verification functions in [`proof`], [`checkpoint`], [`note`],
+/// [`coniks`], [`commitment`], [`policy`], and [`keytrans`]. It contains **no**
+/// parallel log or crypto logic, so the verifications it performs are identical
+/// to the native crate and the WASM SDK. Verification-only — no signing /
+/// producer surface crosses the FFI. Only compiled with `--features uniffi`.
+#[cfg(feature = "uniffi")]
+pub mod ffi;
+
+#[cfg(feature = "uniffi")]
+uniffi::setup_scaffolding!("metamorphic_log");
+
 pub use error::{Error, Result};
 pub use proof::{verify_consistency, verify_inclusion};

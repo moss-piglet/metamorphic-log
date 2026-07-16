@@ -1,0 +1,121 @@
+name: CI (native)
+
+# Dry-run gate for the native (UniFFI) verification SDK: build the cdylib with
+# `--features uniffi`, generate the Swift / Kotlin / Python bindings in CI from
+# the compiled library (library mode — bindings are NEVER committed, they are
+# regenerated per run), and run the per-language round-trip smoke tests against
+# the same locked KAT vectors the native Rust and WASM suites verify.
+#
+# This mirrors ci.yml's `wasm-build` / `cross-language-kat` philosophy for the
+# native surface: a binding/packaging regression is caught on every PR rather
+# than only at `native-v*` tag time. No publishing happens here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Swift: macOS runner (the only host that can build for Apple targets). Builds
+  # the cdylib, generates the Swift bindings, then compiles + runs the smoke
+  # against the freshly built dylib.
+  swift-smoke:
+    name: Swift bindings smoke (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build cdylib (--features uniffi)
+        run: cargo build --features uniffi
+
+      - name: Generate Swift bindings
+        run: |
+          cargo run --features uniffi --bin uniffi-bindgen -- \
+            generate --library target/debug/libmetamorphic_log.dylib \
+            --language swift --out-dir bindings/swift
+
+      - name: Compile + run Swift smoke
+        run: |
+          mkdir -p target/smoke-swift
+          cp bindings/swift/metamorphic_logFFI.modulemap target/smoke-swift/module.modulemap
+          cp bindings/swift/metamorphic_logFFI.h target/smoke-swift/
+          swiftc -sdk "$(xcrun --show-sdk-path)" \
+            -I target/smoke-swift \
+            -L target/debug -lmetamorphic_log \
+            -Xcc -fmodule-map-file=target/smoke-swift/module.modulemap \
+            -parse-as-library \
+            bindings/swift/metamorphic_log.swift native/smoke/Smoke.swift \
+            -o target/smoke-swift/smoke
+          DYLD_LIBRARY_PATH=target/debug target/smoke-swift/smoke .
+
+  # Python: Linux runner. Builds the cdylib, generates the Python bindings, then
+  # runs the smoke with the binding + library search paths wired up.
+  python-smoke:
+    name: Python bindings smoke (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build cdylib (--features uniffi)
+        run: cargo build --features uniffi
+
+      - name: Generate Python bindings
+        run: |
+          cargo run --features uniffi --bin uniffi-bindgen -- \
+            generate --library target/debug/libmetamorphic_log.so \
+            --language python --out-dir bindings/python
+
+      - name: Run Python smoke
+        env:
+          PYTHONPATH: bindings/python
+        run: |
+          # uniffi's generated Python loads the cdylib by absolute path from its
+          # own module directory (not via LD_LIBRARY_PATH), mirroring how the
+          # maturin wheel ships the library beside the module. Colocate it.
+          cp target/debug/libmetamorphic_log.so bindings/python/
+          python3 native/smoke/smoke.py
+
+  # Kotlin/JVM: Linux runner. Builds the cdylib, generates the Kotlin bindings,
+  # then compiles + runs the smoke through a small Gradle project (JNA loads the
+  # desktop JVM shared library). This closes #73's outstanding Kotlin round-trip
+  # smoke, which could not be executed locally (no JVM/kotlinc on that shell).
+  kotlin-smoke:
+    name: Kotlin/JVM bindings smoke (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # Provisions a pinned Gradle without a committed wrapper (checksum-verified
+      # by the action), and caches Gradle state.
+      - uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+        with:
+          gradle-version: "8.14"
+
+      - name: Build cdylib (--features uniffi)
+        run: cargo build --features uniffi
+
+      - name: Generate Kotlin bindings
+        run: |
+          cargo run --features uniffi --bin uniffi-bindgen -- \
+            generate --library target/debug/libmetamorphic_log.so \
+            --language kotlin --out-dir bindings/kotlin
+
+      - name: Compile + run Kotlin smoke
+        env:
+          MOSS_NATIVE_LIB_DIR: ${{ github.workspace }}/target/debug
+        run: gradle -p native/kotlin run --args="${{ github.workspace }}"

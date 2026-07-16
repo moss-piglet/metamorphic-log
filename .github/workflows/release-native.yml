@@ -1,0 +1,591 @@
+name: Release (native)
+
+# Automated release pipeline for the native (UniFFI) verification SDKs
+# (Swift / Kotlin+Android / Python), the native-surface sibling of release.yml
+# (which ships the crate, WASM, and npm). Triggered by a dedicated `native-v*`
+# tag so the native cadence is independent of the crate/WASM `v*` cadence.
+#
+# Design (locked, see task #90):
+#   - guard  : version guard (tag == Cargo.toml) + full quality gates.
+#   - python : maturin uniffi wheels (macOS arm64/x86_64, manylinux
+#              x86_64/aarch64, windows x86_64) + sdist. Per-artifact SBOM +
+#              SHA-512 + cosign keyless + build provenance + GitHub Release.
+#              PyPI trusted publish gated behind vars.PUBLISH_PYPI.
+#   - swift  : macOS xcframework (device/sim/macos) -> GitHub Release. Then,
+#              gated behind vars.PUBLISH_SWIFT, opens a PR against
+#              moss-piglet/metamorphic-log-swift updating the binaryTarget
+#              url+checksum (PR-to-merge, never a PAT auto-push).
+#   - kotlin : Android AAR (arm64-v8a/armeabi-v7a/x86_64 via NDK) + desktop JVM
+#              jar (linux/macos-arm64/macos-x86_64/windows x86_64) -> Central
+#              Portal, GPG-signed, gated behind vars.PUBLISH_MAVEN.
+#
+# Every registry publish is OFF by default: the first `native-v*` tag produces
+# signed + attested artifacts on the GitHub Release with NO registry push. Flip
+# each vars.PUBLISH_* on as its trusted-publisher / token setup completes. All
+# publish steps are idempotent so a re-run of a partially-completed release is
+# safe.
+#
+# Third-party actions are pinned to a full commit SHA (SLSA L3 / federal
+# supply-chain requirement); pins mirror release.yml where shared. Build tools
+# (maturin, cargo-ndk, cargo-cyclonedx, cargo-audit, ziglang) are installed from
+# locked sources (cargo install --locked / pinned pip versions) rather than
+# unpinned marketplace actions, so the toolchain supply chain stays verifiable.
+
+on:
+  push:
+    tags: ["native-v*"]
+
+permissions:
+  contents: write
+  attestations: write
+  id-token: write
+
+# Never let two native tag pushes race the publish steps.
+concurrency:
+  group: release-native-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Release/build toolchain. Intentionally newer than the crate MSRV
+  # (rust-version = "1.85"); MSRV is verified separately in ci.yml. Mirrors
+  # release.yml so both pipelines build with the same compiler.
+  RUST_TOOLCHAIN: "1.90"
+  # Pinned build tooling (single point to bump; installed via cargo/pip from
+  # locked sources rather than unpinned actions).
+  MATURIN_VERSION: "1.8.2"
+  ZIGLANG_VERSION: "0.13.0"
+  CARGO_NDK_VERSION: "3.5.4"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # guard: fail fast before any platform build fans out. Verifies the tag
+  # matches Cargo.toml (single source of truth) and runs the same quality gates
+  # release.yml runs, plus a clippy pass with `--features uniffi` so the FFI
+  # personality is linted at release time too.
+  # --------------------------------------------------------------------------
+  guard:
+    name: Guard + quality gates
+    runs-on: ubuntu-latest
+    environment: release
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # `native-v*` tag drives the release, but every downstream packaging tool
+      # (maturin, Gradle, Package.swift) reads the version from Cargo.toml. If
+      # they disagree the release ships mislabeled artifacts, so fail here.
+      - name: Verify Cargo.toml version matches tag
+        id: ver
+        run: |
+          tag="${GITHUB_REF_NAME#native-v}"
+          crate="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          echo "tag=${tag} Cargo.toml=${crate}"
+          if [ "${tag}" != "${crate}" ]; then
+            echo "::error::Tag native-v${tag} does not match Cargo.toml version ${crate}. Bump Cargo.toml (and Cargo.lock) before tagging."
+            exit 1
+          fi
+          echo "version=${crate}" >> "$GITHUB_OUTPUT"
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (--features uniffi)
+        run: cargo clippy --all-targets --features uniffi -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit dependencies
+        run: cargo audit
+
+  # --------------------------------------------------------------------------
+  # python: maturin uniffi wheels. uniffi Python bindings are pure Python that
+  # load the compiled cdylib via ctypes, so one wheel per platform is portable
+  # across CPython versions (no per-python-version matrix needed).
+  # --------------------------------------------------------------------------
+  python-build:
+    name: Python wheel (${{ matrix.wheel }})
+    needs: guard
+    runs-on: ${{ matrix.runner }}
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, wheel: manylinux-x86_64, zig: true, sdist: true }
+          - { runner: ubuntu-latest, target: aarch64-unknown-linux-gnu, wheel: manylinux-aarch64, zig: true, sdist: false }
+          - { runner: macos-14, target: aarch64-apple-darwin, wheel: macos-arm64, zig: false, sdist: false }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, wheel: macos-x86_64, zig: false, sdist: false }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, wheel: windows-x86_64, zig: false, sdist: false }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install maturin
+        run: cargo install maturin --locked --version "${MATURIN_VERSION}"
+
+      # manylinux cross builds use maturin's zig backend for a portable glibc
+      # baseline (arm64 too) without a per-arch container.
+      - name: Install ziglang (zig cross builds)
+        if: matrix.zig
+        run: python3 -m pip install --user "ziglang==${ZIGLANG_VERSION}"
+
+      - name: Build wheel
+        working-directory: native/python
+        shell: bash
+        run: |
+          out="${GITHUB_WORKSPACE}/dist"
+          zig=""
+          if [ "${{ matrix.zig }}" = "true" ]; then zig="--zig"; fi
+          maturin build --release --target "${{ matrix.target }}" ${zig} --out "${out}"
+
+      - name: Build sdist
+        if: matrix.sdist
+        working-directory: native/python
+        run: maturin sdist --out "${GITHUB_WORKSPACE}/dist"
+
+      # --- SBOM (CycloneDX) from Cargo.lock: the exact tree the cdylib was
+      #     built from. One per matrix leg, suffixed to avoid collisions on the
+      #     shared Release. ---
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate SBOM
+        shell: bash
+        run: |
+          cargo cyclonedx --format json --override-filename sbom
+          cp sbom.json "dist/sbom-python-${{ matrix.wheel }}.json"
+
+      - name: Compute SHA-512 checksums
+        working-directory: dist
+        shell: bash
+        run: sha512sum -- * > "SHA512SUMS-python-${{ matrix.wheel }}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Keyless (GitHub OIDC) signature per built file.
+      - name: Sign artifacts with cosign
+        working-directory: dist
+        shell: bash
+        run: |
+          for f in *.whl *.tar.gz sbom-python-*.json; do
+            [ -e "$f" ] || continue
+            cosign sign-blob --yes --bundle "${f}.cosign.bundle" "$f"
+          done
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+
+      - name: Attach artifacts to GitHub Release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/sbom-python-${{ matrix.wheel }}.json
+            dist/SHA512SUMS-python-${{ matrix.wheel }}
+            dist/*.cosign.bundle
+          fail_on_unmatched_files: false
+
+      # Hand the raw distributables to the aggregated publish job.
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-dist-${{ matrix.wheel }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  # PyPI trusted publish (OIDC). Gated OFF by default; flip vars.PUBLISH_PYPI on
+  # once the PyPI Trusted Publisher is configured (see the handoff commands).
+  python-publish:
+    name: Publish to PyPI (gated)
+    needs: python-build
+    if: vars.PUBLISH_PYPI == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Download all python dists
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: python-dist-*
+          path: dist
+          merge-multiple: true
+
+      # Trusted publishing: no API token stored. skip-existing keeps a re-run of
+      # a partial release idempotent.
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: dist
+          skip-existing: true
+
+  # --------------------------------------------------------------------------
+  # swift: build a static-library xcframework (device + simulator + macOS) from
+  # the cdylib crate compiled as a staticlib per Apple target (via
+  # `cargo rustc --crate-type staticlib`, so no Cargo.toml change), bundle the
+  # CI-generated Swift bindings' header/modulemap, zip it, and attach it + the
+  # SwiftPM checksum to the GitHub Release. The consuming Package.swift lives in
+  # the separate moss-piglet/metamorphic-log-swift repo; when vars.PUBLISH_SWIFT
+  # is on we open a PR there updating binaryTarget(url, checksum) + tag.
+  # --------------------------------------------------------------------------
+  swift:
+    name: Swift xcframework (macOS)
+    needs: guard
+    runs-on: macos-14
+    environment: release
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # Generate the Swift bindings once from a debug library (library mode);
+      # only the header + modulemap + swift wrapper are needed to assemble the
+      # framework — the linked binary comes from the per-target staticlibs.
+      - name: Build cdylib + generate Swift bindings
+        run: |
+          cargo build --features uniffi
+          cargo run --features uniffi --bin uniffi-bindgen -- \
+            generate --library target/debug/libmetamorphic_log.dylib \
+            --language swift --out-dir bindings/swift
+
+      - name: Build static libraries per Apple target
+        run: |
+          for t in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo rustc --release --features uniffi --crate-type staticlib --target "$t"
+          done
+
+      - name: Assemble xcframework
+        run: |
+          set -euo pipefail
+          hdr=target/xc-headers
+          mkdir -p "$hdr"
+          cp bindings/swift/metamorphic_logFFI.h "$hdr/"
+          cp bindings/swift/metamorphic_logFFI.modulemap "$hdr/module.modulemap"
+
+          lib=libmetamorphic_log.a
+
+          # Fat simulator lib (arm64 + x86_64) and fat macOS lib (arm64 + x86_64).
+          mkdir -p target/xc/sim target/xc/macos
+          lipo -create \
+            "target/aarch64-apple-ios-sim/release/${lib}" \
+            "target/x86_64-apple-ios/release/${lib}" \
+            -output "target/xc/sim/${lib}"
+          lipo -create \
+            "target/aarch64-apple-darwin/release/${lib}" \
+            "target/x86_64-apple-darwin/release/${lib}" \
+            -output "target/xc/macos/${lib}"
+
+          rm -rf target/MetamorphicLogFFI.xcframework
+          xcodebuild -create-xcframework \
+            -library "target/aarch64-apple-ios/release/${lib}" -headers "$hdr" \
+            -library "target/xc/sim/${lib}" -headers "$hdr" \
+            -library "target/xc/macos/${lib}" -headers "$hdr" \
+            -output target/MetamorphicLogFFI.xcframework
+
+      - name: Package xcframework + Swift sources
+        id: pkg
+        run: |
+          set -euo pipefail
+          stage="target/swift-stage"
+          mkdir -p "$stage/Sources/MetamorphicLog"
+          cp bindings/swift/metamorphic_log.swift "$stage/Sources/MetamorphicLog/"
+          cp -R target/MetamorphicLogFFI.xcframework "$stage/"
+
+          zip="MetamorphicLogFFI-${VERSION}.xcframework.zip"
+          ( cd "$stage" && zip -qry "../../${zip}" MetamorphicLogFFI.xcframework )
+
+          # Swift sources shipped separately so the binary target stays a pure
+          # framework zip; consumers get sources from the swift repo tag.
+          src_zip="MetamorphicLog-Sources-${VERSION}.zip"
+          ( cd "$stage/Sources" && zip -qry "../../../${src_zip}" MetamorphicLog )
+
+          checksum="$(swift package compute-checksum "${zip}")"
+          echo "checksum=${checksum}" >> "$GITHUB_OUTPUT"
+          echo "zip=${zip}" >> "$GITHUB_OUTPUT"
+          echo "${checksum}  ${zip}" > "${zip}.checksum.txt"
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate SBOM + checksums
+        run: |
+          cargo cyclonedx --format json --override-filename sbom
+          cp sbom.json "sbom-swift.json"
+          shasum -a 512 "${{ steps.pkg.outputs.zip }}" sbom-swift.json > SHA512SUMS-swift
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign artifacts with cosign
+        run: |
+          cosign sign-blob --yes --bundle "${{ steps.pkg.outputs.zip }}.cosign.bundle" "${{ steps.pkg.outputs.zip }}"
+          cosign sign-blob --yes --bundle "sbom-swift.json.cosign.bundle" sbom-swift.json
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: ${{ steps.pkg.outputs.zip }}
+
+      - name: Attach artifacts to GitHub Release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          files: |
+            ${{ steps.pkg.outputs.zip }}
+            ${{ steps.pkg.outputs.zip }}.checksum.txt
+            ${{ steps.pkg.outputs.zip }}.cosign.bundle
+            MetamorphicLog-Sources-${{ env.VERSION }}.zip
+            sbom-swift.json
+            sbom-swift.json.cosign.bundle
+            SHA512SUMS-swift
+          fail_on_unmatched_files: true
+
+      # Gated: open (never force-push) a PR against the swift distribution repo
+      # updating the binaryTarget url + checksum and tagging the release.
+      # GH_TOKEN_SWIFT_REPO is a fine-grained PAT with contents+pull-request
+      # write on moss-piglet/metamorphic-log-swift (see handoff commands).
+      - name: Open PR to metamorphic-log-swift (gated)
+        if: vars.PUBLISH_SWIFT == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN_SWIFT_REPO }}
+          CHECKSUM: ${{ steps.pkg.outputs.checksum }}
+          ZIP: ${{ steps.pkg.outputs.zip }}
+        run: |
+          set -euo pipefail
+          repo="moss-piglet/metamorphic-log-swift"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${ZIP}"
+          branch="release/native-v${VERSION}"
+
+          work="$(mktemp -d)"
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" "$work"
+          cd "$work"
+          git checkout -b "$branch"
+
+          python3 - "$url" "$CHECKSUM" "$VERSION" <<'PY'
+          import re, sys, pathlib
+          url, checksum, version = sys.argv[1], sys.argv[2], sys.argv[3]
+          p = pathlib.Path("Package.swift")
+          s = p.read_text()
+          s = re.sub(r'(url:\s*")[^"]*(")', rf'\g<1>{url}\g<2>', s)
+          s = re.sub(r'(checksum:\s*")[^"]*(")', rf'\g<1>{checksum}\g<2>', s)
+          p.write_text(s)
+          pathlib.Path("VERSION").write_text(version + "\n")
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "release: native-v${VERSION}"
+          git push -f origin "$branch"
+          gh pr create --repo "$repo" --head "$branch" --base main \
+            --title "release: native-v${VERSION}" \
+            --body "Automated by ${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}. Updates binaryTarget url+checksum. Tag \`native-v${VERSION}\` after merge." \
+            || echo "::warning::PR may already exist for ${branch}; continuing."
+
+  # --------------------------------------------------------------------------
+  # kotlin: desktop JVM cdylibs are built on their native runners (matrix) and
+  # uploaded; the assemble job gathers them + builds the Android cdylibs via the
+  # runner's preinstalled NDK, then Gradle produces the AAR + desktop JVM jar,
+  # GPG-signs, and (gated) publishes to the Central Portal.
+  # --------------------------------------------------------------------------
+  kotlin-desktop:
+    name: Desktop JVM lib (${{ matrix.jni }})
+    needs: guard
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, jni: linux-x86-64, lib: libmetamorphic_log.so }
+          - { runner: macos-14, target: aarch64-apple-darwin, jni: darwin-aarch64, lib: libmetamorphic_log.dylib }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, jni: darwin-x86-64, lib: libmetamorphic_log.dylib }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, jni: win32-x86-64, lib: metamorphic_log.dll }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build cdylib
+        run: cargo build --release --features uniffi --target ${{ matrix.target }}
+
+      # JNA resolves desktop libs from resource path /<jna-platform>/<libname>.
+      - name: Stage desktop lib
+        shell: bash
+        run: |
+          mkdir -p "jni/${{ matrix.jni }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.lib }}" "jni/${{ matrix.jni }}/"
+
+      - name: Upload desktop lib
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: jvm-jni-${{ matrix.jni }}
+          path: jni/${{ matrix.jni }}/*
+          if-no-files-found: error
+
+  kotlin-assemble:
+    name: Android AAR + JVM jar (Maven)
+    needs: [guard, kotlin-desktop]
+    runs-on: ubuntu-latest
+    environment: release
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+        with:
+          gradle-version: "8.14"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked --version "${CARGO_NDK_VERSION}"
+
+      # Generate the Kotlin bindings once (library mode) from a host cdylib.
+      - name: Build host cdylib + generate Kotlin bindings
+        run: |
+          cargo build --features uniffi
+          cargo run --features uniffi --bin uniffi-bindgen -- \
+            generate --library target/debug/libmetamorphic_log.so \
+            --language kotlin --out-dir bindings/kotlin
+
+      # Android JNI libs via the runner's preinstalled NDK (cargo-ndk
+      # auto-detects ANDROID_NDK_LATEST_HOME / ANDROID_NDK_HOME on the runner).
+      - name: Build Android JNI libs
+        run: |
+          cargo ndk \
+            -t arm64-v8a -t armeabi-v7a -t x86_64 \
+            -o native/android/library/src/main/jniLibs \
+            build --release --features uniffi
+
+      - name: Download desktop JVM libs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: jvm-jni-*
+          path: native/android/jvm/src/main/resources
+          merge-multiple: true
+
+      - name: Build AAR + JVM jar
+        working-directory: native/android
+        env:
+          ML_VERSION: ${{ env.VERSION }}
+        run: gradle --no-daemon :library:assembleRelease :jvm:jar
+
+      # --- Supply-chain parity for the Maven artifacts. ---
+      - name: Collect Maven artifacts
+        working-directory: native/android
+        run: |
+          mkdir -p ../../dist-maven
+          find library/build/outputs/aar -name '*.aar' -exec cp {} ../../dist-maven/ \;
+          find jvm/build/libs -name '*.jar' -exec cp {} ../../dist-maven/ \;
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate SBOM + checksums
+        run: |
+          cargo cyclonedx --format json --override-filename sbom
+          cp sbom.json dist-maven/sbom-maven.json
+          ( cd dist-maven && sha512sum ./* > SHA512SUMS-maven )
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign artifacts with cosign
+        working-directory: dist-maven
+        run: |
+          for f in *.aar *.jar sbom-maven.json; do
+            [ -e "$f" ] || continue
+            cosign sign-blob --yes --bundle "${f}.cosign.bundle" "$f"
+          done
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dist-maven/*.aar
+            dist-maven/*.jar
+
+      - name: Attach artifacts to GitHub Release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          files: |
+            dist-maven/*.aar
+            dist-maven/*.jar
+            dist-maven/sbom-maven.json
+            dist-maven/SHA512SUMS-maven
+            dist-maven/*.cosign.bundle
+          fail_on_unmatched_files: true
+
+      # Gated: GPG-signed publish to the Central Portal. Idempotent — Portal
+      # rejects re-publishing an existing version; we treat that as success.
+      - name: Publish to Maven Central Portal (gated)
+        if: vars.PUBLISH_MAVEN == 'true'
+        working-directory: native/android
+        env:
+          ML_VERSION: ${{ env.VERSION }}
+          ORG_GRADLE_PROJECT_signingKey: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+          ORG_GRADLE_PROJECT_centralUsername: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
+          ORG_GRADLE_PROJECT_centralPassword: ${{ secrets.CENTRAL_PORTAL_PASSWORD }}
+        run: |
+          set +e
+          out="$(gradle --no-daemon publishAggregationToCentralPortal 2>&1)"; code=$?
+          echo "${out}"
+          if [ "${code}" -ne 0 ]; then
+            if echo "${out}" | grep -qiE "already exists|already been published|409"; then
+              echo "::warning::io.github.moss-piglet:metamorphic-log ${VERSION} already on Central; skipping and resuming."
+            else
+              exit "${code}"
+            fi
+          fi

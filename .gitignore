@@ -1,3 +1,21 @@
 /target/
 /pkg/
 *.DS_Store
+/bindings/
+
+# Native (UniFFI) SDK build artifacts.
+native/kotlin/.gradle/
+native/kotlin/build/
+/native/**/*.xcframework
+/native/**/*.xcframework.zip
+
+# Release packaging build outputs (regenerated in CI).
+/dist/
+/dist-maven/
+native/android/.gradle/
+native/android/build/
+native/android/*/build/
+native/android/library/src/main/jniLibs/
+native/android/jvm/src/main/resources/
+/sbom*.json
+/SHA512SUMS*

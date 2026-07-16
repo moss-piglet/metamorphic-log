@@ -1,0 +1,65 @@
+// Desktop JVM jar: io.github.moss-piglet:metamorphic-log-jvm
+//
+// Wraps the CI-generated UniFFI Kotlin bindings (../../../bindings/kotlin) and
+// bundles the desktop shared libraries under JNA resource paths
+// (src/main/resources/<jna-platform>/) staged by release-native.yml.
+
+plugins {
+    id("org.jetbrains.kotlin.jvm") version "2.0.21"
+    id("java-library")
+    id("maven-publish")
+    id("signing")
+    id("com.gradleup.nmcp") version "0.0.9"
+}
+
+java {
+    withSourcesJar()
+    withJavadocJar()
+    toolchain { languageVersion.set(JavaLanguageVersion.of(21)) }
+}
+
+sourceSets {
+    named("main") {
+        // UniFFI-generated Kotlin (gitignored, produced in CI).
+        kotlin.srcDir("../../../bindings/kotlin")
+        // Desktop libs live under resources/<jna-platform>/<libname> so JNA
+        // extracts + loads them at runtime.
+        resources.srcDir("src/main/resources")
+    }
+}
+
+dependencies {
+    api("net.java.dev.jna:jna:5.14.0")
+}
+
+publishing {
+    publications {
+        register<MavenPublication>("jvm") {
+            artifactId = "metamorphic-log-jvm"
+            from(components["java"])
+            pom {
+                name.set("metamorphic-log (JVM)")
+                description.set("Verification-only desktop JVM bindings for metamorphic-log transparency checkpoints, signed notes, and commitments.")
+                url.set("https://github.com/moss-piglet/metamorphic-log")
+                licenses {
+                    license { name.set("Apache-2.0"); url.set("https://www.apache.org/licenses/LICENSE-2.0") }
+                    license { name.set("MIT"); url.set("https://opensource.org/licenses/MIT") }
+                }
+                developers { developer { id.set("moss-piglet"); name.set("moss-piglet") } }
+                scm {
+                    url.set("https://github.com/moss-piglet/metamorphic-log")
+                    connection.set("scm:git:https://github.com/moss-piglet/metamorphic-log.git")
+                }
+            }
+        }
+    }
+}
+
+signing {
+    val key = System.getenv("ORG_GRADLE_PROJECT_signingKey")
+    val pass = System.getenv("ORG_GRADLE_PROJECT_signingPassword")
+    if (!key.isNullOrBlank()) {
+        useInMemoryPgpKeys(key, pass)
+        sign(publishing.publications)
+    }
+}

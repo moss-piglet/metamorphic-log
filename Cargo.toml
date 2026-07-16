@@ -17,6 +17,20 @@ wasm-opt = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# Native FFI bindings generator (opt-in, `--features uniffi`). Library-mode
+# UniFFI: this bin wraps `uniffi::uniffi_bindgen_main()` so bindings are
+# generated straight from the compiled cdylib (no UDL). Never built by the
+# default / WASM / Elixir-NIF pipelines.
+[[bin]]
+name = "uniffi-bindgen"
+required-features = ["uniffi"]
+
+[features]
+# Opt-in native verification SDK via UniFFI (Swift/Kotlin/Python). Gates the
+# thin `ffi` personality in `src/ffi.rs`. Off by default so the rlib, the
+# wasm32 verifier, and the sibling Elixir NIF are completely unaffected.
+uniffi = ["dep:uniffi"]
+
 # Slice-7 throughput benchmark for the deterministic ingestion primitives.
 # Dependency-free (`harness = false`, std-only — no criterion), keeping the
 # minimal dependency surface. Native-only: it exercises pure logic and is never
@@ -53,6 +67,14 @@ thiserror = "2"
 # metamorphic-crypto's wasm handling: getrandom 0.2 needs its `js` backend on
 # wasm32 so the crate still type-checks for the browser verifier build.
 getrandom = "0.2"
+
+# Native FFI (opt-in via the `uniffi` feature). Modern proc-macro UniFFI
+# (`#[uniffi::export]` / `#[derive(uniffi::Record|Enum|Error)]`) — no UDL. The
+# `cli` feature provides `uniffi_bindgen_main()` for the library-mode
+# `uniffi-bindgen` bin. Optional so it is pulled ONLY when `--features uniffi`
+# is set; the default rlib, the wasm32 verifier, and the Elixir NIF never see
+# it.
+uniffi = { version = "0.32", features = ["cli"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
