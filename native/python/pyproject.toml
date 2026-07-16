@@ -41,6 +41,9 @@ Repository = "https://github.com/moss-piglet/metamorphic-log"
 [tool.maturin]
 # uniffi bindings mode: generate the Python module from the compiled cdylib.
 bindings = "uniffi"
+# The distribution name is "metamorphic-log" but a Python module name cannot
+# contain "-"; pin it to the uniffi namespace (src/lib.rs setup_scaffolding).
+module-name = "metamorphic_log"
 # The crate is the workspace root, two levels up.
 manifest-path = "../../Cargo.toml"
 # The FFI personality is opt-in behind this feature.
