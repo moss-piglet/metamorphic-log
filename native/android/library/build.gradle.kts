@@ -3,9 +3,11 @@
 // Wraps the CI-generated UniFFI Kotlin bindings (../../../bindings/kotlin) and
 // the cargo-ndk jniLibs staged under src/main/jniLibs by release-native.yml.
 
+// Versions are declared once at the root build.gradle.kts (apply false); here we
+// only apply the plugins.
 plugins {
-    id("com.android.library") version "8.5.2"
-    id("org.jetbrains.kotlin.android") version "2.0.21"
+    id("com.android.library")
+    id("org.jetbrains.kotlin.android")
     id("maven-publish")
     id("signing")
     id("com.gradleup.nmcp")
@@ -17,6 +19,14 @@ android {
 
     defaultConfig {
         minSdk = 24
+    }
+
+    // Pin the Java bytecode target so it matches the Kotlin jvmTarget below;
+    // without this AGP defaults javac to 1.8 while Kotlin targets the toolchain
+    // JDK (21 on the runner), failing with "Inconsistent JVM-target".
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     sourceSets {
@@ -32,6 +42,14 @@ android {
         singleVariant("release") {
             withSourcesJar()
         }
+    }
+}
+
+// Match the Kotlin JVM target to compileOptions (17) so the Kotlin and Java
+// compile tasks agree.
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 

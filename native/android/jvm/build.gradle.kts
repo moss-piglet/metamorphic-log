@@ -4,8 +4,10 @@
 // bundles the desktop shared libraries under JNA resource paths
 // (src/main/resources/<jna-platform>/) staged by release-native.yml.
 
+// Versions are declared once at the root build.gradle.kts (apply false); here we
+// only apply the plugins.
 plugins {
-    id("org.jetbrains.kotlin.jvm") version "2.0.21"
+    id("org.jetbrains.kotlin.jvm")
     id("java-library")
     id("maven-publish")
     id("signing")

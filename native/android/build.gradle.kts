@@ -16,7 +16,17 @@
 //
 // NOTE: plugin/library versions are scaffolding pins; validate + bump in CI.
 
+// Declare every plugin ONCE at the root with `apply false` + version, then let
+// each subproject apply them WITHOUT a version. This is the Gradle-recommended
+// layout and it silences the "Kotlin Gradle plugin loaded multiple times in
+// different subprojects" warning that fired when each subproject pinned its own
+// version. AGP 8.7.x is the first line that officially supports compileSdk 35
+// (needs Gradle 8.9+, and CI runs 8.14).
 plugins {
+    id("com.android.library") version "8.7.3" apply false
+    id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+    id("org.jetbrains.kotlin.jvm") version "2.0.21" apply false
+    id("com.gradleup.nmcp") version "1.6.1" apply false
     id("com.gradleup.nmcp.aggregation") version "1.6.1"
 }
 
