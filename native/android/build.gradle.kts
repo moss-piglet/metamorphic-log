@@ -17,7 +17,7 @@
 // NOTE: plugin/library versions are scaffolding pins; validate + bump in CI.
 
 plugins {
-    id("com.gradleup.nmcp.aggregation") version "0.0.9"
+    id("com.gradleup.nmcp.aggregation") version "1.6.1"
 }
 
 // Single source of truth: the crate version, passed in via ML_VERSION.

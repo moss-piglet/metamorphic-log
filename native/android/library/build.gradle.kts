@@ -8,7 +8,7 @@ plugins {
     id("org.jetbrains.kotlin.android") version "2.0.21"
     id("maven-publish")
     id("signing")
-    id("com.gradleup.nmcp") version "0.0.9"
+    id("com.gradleup.nmcp") version "1.6.1"
 }
 
 android {
