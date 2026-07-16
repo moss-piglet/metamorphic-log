@@ -17,14 +17,14 @@ wasm-opt = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-# Native FFI bindings generator (opt-in, `--features uniffi`). Library-mode
-# UniFFI: this bin wraps `uniffi::uniffi_bindgen_main()` so bindings are
-# generated straight from the compiled cdylib (no UDL). Never built by the
-# default / WASM / Elixir-NIF pipelines.
-[[bin]]
-name = "uniffi-bindgen"
-required-features = ["uniffi"]
-
+# Native FFI bindings generator lives in its OWN crate (tools/uniffi-bindgen),
+# not an in-crate bin. maturin's uniffi mode runs `uniffi-bindgen` and does not
+# forward `--features`, so a feature-gated in-crate bin cannot satisfy it. The
+# standalone crate always has uniffi's `cli`, keeping the `uniffi` feature here
+# purely a gate for the `ffi` personality (off by default; the rlib, wasm32
+# verifier, and Elixir NIF stay unaffected). Generate with:
+#   cargo build --features uniffi
+#   uniffi-bindgen generate --library <cdylib> --language <lang> --out-dir <dir>
 [features]
 # Opt-in native verification SDK via UniFFI (Swift/Kotlin/Python). Gates the
 # thin `ffi` personality in `src/ffi.rs`. Off by default so the rlib, the

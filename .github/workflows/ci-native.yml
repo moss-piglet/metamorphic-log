@@ -36,7 +36,8 @@ jobs:
 
       - name: Generate Swift bindings
         run: |
-          cargo run --features uniffi --bin uniffi-bindgen -- \
+          cargo install --path tools/uniffi-bindgen
+          uniffi-bindgen \
             generate --library target/debug/libmetamorphic_log.dylib \
             --language swift --out-dir bindings/swift
 
@@ -69,7 +70,8 @@ jobs:
 
       - name: Generate Python bindings
         run: |
-          cargo run --features uniffi --bin uniffi-bindgen -- \
+          cargo install --path tools/uniffi-bindgen
+          uniffi-bindgen \
             generate --library target/debug/libmetamorphic_log.so \
             --language python --out-dir bindings/python
 
@@ -111,7 +113,8 @@ jobs:
 
       - name: Generate Kotlin bindings
         run: |
-          cargo run --features uniffi --bin uniffi-bindgen -- \
+          cargo install --path tools/uniffi-bindgen
+          uniffi-bindgen \
             generate --library target/debug/libmetamorphic_log.so \
             --language kotlin --out-dir bindings/kotlin
 

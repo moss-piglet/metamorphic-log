@@ -1,0 +1,29 @@
+# Standalone library-mode UniFFI bindings generator for the native verification
+# SDK. Kept as its own crate (with its own `[workspace]` so the parent package
+# never treats it as a member) precisely so `uniffi-bindgen` can be built and
+# run WITHOUT the parent's opt-in `uniffi` feature. This is what maturin's
+# uniffi mode expects (it invokes `uniffi-bindgen` and does not forward cargo
+# `--features`), and it keeps the `uniffi` dependency out of the parent's
+# default / WASM / Elixir-NIF builds.
+#
+# Install on PATH:  cargo install --path tools/uniffi-bindgen
+# Then:             uniffi-bindgen generate --library <cdylib> --language <lang> --out-dir <dir>
+
+[package]
+name = "uniffi-bindgen"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+# Same UniFFI major as the parent crate's optional dep (Cargo.toml), so the
+# generator matches the metadata compiled into the cdylib.
+uniffi = { version = "0.32", features = ["cli"] }
+
+# Own workspace root: decouples this helper crate from the parent package dir so
+# `cargo build`/`test` at the repo root never build it.
+[workspace]
