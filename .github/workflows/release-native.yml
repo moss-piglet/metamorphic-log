@@ -124,6 +124,11 @@ jobs:
     needs: guard
     runs-on: ${{ matrix.runner }}
     environment: release
+    # Use bash on every runner (Windows defaults to PowerShell, which does not
+    # expand ${VAR} env references used across these steps).
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -145,6 +150,11 @@ jobs:
 
       - name: Install maturin
         run: cargo install maturin --locked --version "${MATURIN_VERSION}"
+
+      # maturin's uniffi mode invokes `uniffi-bindgen` from PATH (it does not
+      # forward cargo --features), so install our standalone generator crate.
+      - name: Install uniffi-bindgen
+        run: cargo install --path tools/uniffi-bindgen
 
       # manylinux cross builds use maturin's zig backend for a portable glibc
       # baseline (arm64 too) without a per-arch container.
@@ -280,7 +290,8 @@ jobs:
       - name: Build cdylib + generate Swift bindings
         run: |
           cargo build --features uniffi
-          cargo run --features uniffi --bin uniffi-bindgen -- \
+          cargo install --path tools/uniffi-bindgen
+          uniffi-bindgen \
             generate --library target/debug/libmetamorphic_log.dylib \
             --language swift --out-dir bindings/swift
 
@@ -501,7 +512,8 @@ jobs:
       - name: Build host cdylib + generate Kotlin bindings
         run: |
           cargo build --features uniffi
-          cargo run --features uniffi --bin uniffi-bindgen -- \
+          cargo install --path tools/uniffi-bindgen
+          uniffi-bindgen \
             generate --library target/debug/libmetamorphic_log.so \
             --language kotlin --out-dir bindings/kotlin
 

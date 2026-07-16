@@ -1,0 +1,14 @@
+/Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/deps/serde-0d70d5c04ad2e03b.d: /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/build/serde-f474d4e75769aa60/out/private.rs
+
+/Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/deps/libserde-0d70d5c04ad2e03b.rlib: /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/build/serde-f474d4e75769aa60/out/private.rs
+
+/Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/deps/libserde-0d70d5c04ad2e03b.rmeta: /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/build/serde-f474d4e75769aa60/out/private.rs
+
+/Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/build/serde-f474d4e75769aa60/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/build/serde-f474d4e75769aa60/out

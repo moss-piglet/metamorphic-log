@@ -1,0 +1,14 @@
+/Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/deps/thiserror-74a5855649f40f7f.d: /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/build/thiserror-549cf28f9e525dd0/out/private.rs
+
+/Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/deps/libthiserror-74a5855649f40f7f.rlib: /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/build/thiserror-549cf28f9e525dd0/out/private.rs
+
+/Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/deps/libthiserror-74a5855649f40f7f.rmeta: /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/build/thiserror-549cf28f9e525dd0/out/private.rs
+
+/Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs:
+/Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs:
+/Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs:
+/Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs:
+/Users/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs:
+/Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/build/thiserror-549cf28f9e525dd0/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/mark/github/metamorphic-log/tools/uniffi-bindgen/target/release/build/thiserror-549cf28f9e525dd0/out
