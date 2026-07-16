@@ -1,0 +1,48 @@
+# maturin packaging for the Python (UniFFI) verification bindings.
+#
+# uniffi layout: maturin compiles the crate's cdylib with `--features uniffi`
+# and generates the pure-Python `metamorphic_log` module that loads it via
+# ctypes. Because no CPython C-API is used, one wheel per platform is portable
+# across CPython versions (the release-native.yml python matrix builds one wheel
+# per OS/arch: macOS arm64/x86_64, manylinux x86_64/aarch64, windows x86_64).
+#
+# Verification-only surface (checkpoint_verify / verify_signed_note /
+# verify_commitment + typed VerifyError); no secret key material crosses FFI.
+#
+# Build (from this dir):  maturin build --release --out ../../dist
+# The crate lives two levels up; manifest-path points at the workspace crate so
+# the version stays single-sourced in Cargo.toml.
+
+[build-system]
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "metamorphic-log"
+description = "Verification-only client for metamorphic-log transparency checkpoints, signed notes, and commitments (UniFFI bindings)."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0 OR MIT" }
+authors = [{ name = "moss-piglet" }]
+keywords = ["transparency-log", "verification", "checkpoint", "signed-note", "uniffi"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security :: Cryptography",
+    "Intended Audience :: Developers",
+]
+# Version is sourced dynamically from Cargo.toml (single source of truth).
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/moss-piglet/metamorphic-log"
+Repository = "https://github.com/moss-piglet/metamorphic-log"
+
+[tool.maturin]
+# uniffi bindings mode: generate the Python module from the compiled cdylib.
+bindings = "uniffi"
+# The crate is the workspace root, two levels up.
+manifest-path = "../../Cargo.toml"
+# The FFI personality is opt-in behind this feature.
+features = ["uniffi"]
+strip = true

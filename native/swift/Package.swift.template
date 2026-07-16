@@ -1,0 +1,40 @@
+// swift-tools-version:5.9
+//
+// Package.swift TEMPLATE for the separate distribution repo
+// moss-piglet/metamorphic-log-swift.
+//
+// release-native.yml's swift job builds the xcframework, attaches
+// `MetamorphicLogFFI-<version>.xcframework.zip` to the metamorphic-log GitHub
+// Release, computes its SwiftPM checksum, and (when vars.PUBLISH_SWIFT is on)
+// opens a PR here that rewrites the binaryTarget `url:` and `checksum:` strings
+// below and bumps VERSION. Merge, then tag `native-v<version>` in this repo.
+//
+// The generated Swift wrapper (metamorphic_log.swift) is committed under
+// Sources/MetamorphicLog/ in this repo (shipped as the Sources zip on each
+// Release); the binary target provides the compiled static framework.
+
+import PackageDescription
+
+let package = Package(
+    name: "MetamorphicLog",
+    platforms: [
+        .iOS(.v15),
+        .macOS(.v12),
+    ],
+    products: [
+        .library(name: "MetamorphicLog", targets: ["MetamorphicLog"]),
+    ],
+    targets: [
+        .binaryTarget(
+            name: "MetamorphicLogFFI",
+            // Rewritten by CI (moss-piglet/metamorphic-log release-native.yml).
+            url: "https://github.com/moss-piglet/metamorphic-log/releases/download/native-v0.0.0/MetamorphicLogFFI-0.0.0.xcframework.zip",
+            checksum: "0000000000000000000000000000000000000000000000000000000000000000"
+        ),
+        .target(
+            name: "MetamorphicLog",
+            dependencies: ["MetamorphicLogFFI"],
+            path: "Sources/MetamorphicLog"
+        ),
+    ]
+)
