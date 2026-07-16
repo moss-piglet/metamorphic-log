@@ -76,8 +76,12 @@ jobs:
       - name: Run Python smoke
         env:
           PYTHONPATH: bindings/python
-          LD_LIBRARY_PATH: target/debug
-        run: python3 native/smoke/smoke.py
+        run: |
+          # uniffi's generated Python loads the cdylib by absolute path from its
+          # own module directory (not via LD_LIBRARY_PATH), mirroring how the
+          # maturin wheel ships the library beside the module. Colocate it.
+          cp target/debug/libmetamorphic_log.so bindings/python/
+          python3 native/smoke/smoke.py
 
   # Kotlin/JVM: Linux runner. Builds the cdylib, generates the Kotlin bindings,
   # then compiles + runs the smoke through a small Gradle project (JNA loads the
