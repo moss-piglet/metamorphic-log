@@ -247,6 +247,13 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # The maturin manylinux container runs as root and would create a
+      # root-owned dist/, which the later HOST steps (SBOM/checksums/cosign, run
+      # as the runner user) cannot write into. Pre-create it world-writable so
+      # both the root container and the runner user can write here.
+      - name: Prepare dist dir
+        run: mkdir -p dist && chmod 777 dist
+
       - name: Build manylinux wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
