@@ -24,9 +24,11 @@ sourceSets {
     named("main") {
         // UniFFI-generated Kotlin (gitignored, produced in CI).
         kotlin.srcDir("../../../bindings/kotlin")
-        // Desktop libs live under resources/<jna-platform>/<libname> so JNA
-        // extracts + loads them at runtime.
-        resources.srcDir("src/main/resources")
+        // Desktop libs are staged under the DEFAULT main resources dir
+        // (src/main/resources/<jna-platform>/<libname>) in release-native.yml,
+        // so JNA extracts + loads them at runtime. Do not re-add that dir as a
+        // resources srcDir: it is already the default, and declaring it twice
+        // makes every entry a duplicate (processResources then fails).
     }
 }
 
