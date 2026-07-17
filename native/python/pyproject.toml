@@ -48,4 +48,7 @@ module-name = "metamorphic_log"
 manifest-path = "../../Cargo.toml"
 # The FFI personality is opt-in behind this feature.
 features = ["uniffi"]
-strip = true
+# Do NOT strip: uniffi-bindgen's library mode reads the UniFFI metadata from the
+# cdylib's symbol table, and stripping removes those entries on Linux ELF
+# ("No UniFFI metadata found"). macOS Mach-O happened to survive stripping,
+# which masked this on the macOS legs.
