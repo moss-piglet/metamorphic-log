@@ -675,10 +675,15 @@ jobs:
       # --- Supply-chain parity for the Maven artifacts. ---
       - name: Collect Maven artifacts
         working-directory: native/android
+        env:
+          VERSION: ${{ env.VERSION }}
         run: |
+          set -euo pipefail
           mkdir -p ../../dist-maven
-          find library/build/outputs/aar -name '*.aar' -exec cp {} ../../dist-maven/ \;
-          find jvm/build/libs -name '*.jar' -exec cp {} ../../dist-maven/ \;
+          aar="$(find library/build/outputs/aar -name '*.aar' | head -n1)"
+          jar="$(find jvm/build/libs -name '*.jar' | head -n1)"
+          cp "${aar}" "../../dist-maven/metamorphic-log-${VERSION}.aar"
+          cp "${jar}" "../../dist-maven/metamorphic-log-jvm-${VERSION}.jar"
 
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx --locked
