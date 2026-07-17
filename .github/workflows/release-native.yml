@@ -253,10 +253,20 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: "2_28"
           working-directory: native/python
+          # Override the crate's [profile.release] strip=true INSIDE the
+          # container only: uniffi-bindgen's library mode reads the UniFFI
+          # metadata from the cdylib symbol table, and stripping removes those
+          # entries on Linux ELF ("No UniFFI metadata found"). We must not touch
+          # the shared release profile (WASM/crates/npm rely on it), so scope the
+          # override to this build via a cargo env passthrough.
+          docker-options: -e CARGO_PROFILE_RELEASE_STRIP=false
           # The standalone generator must exist on PATH inside the container;
           # maturin's uniffi mode shells out to it and does not forward cargo
-          # --features. Path is relative to working-directory (native/python).
-          before-script-linux: cargo install --path ../../tools/uniffi-bindgen
+          # --features. Build it for the HOST arch (the aarch64 2_28 container is
+          # a cross image with CARGO_BUILD_TARGET=aarch64; without pinning the
+          # target the generator is built for aarch64 and the x86_64 host cannot
+          # exec it -> "Exec format error"). Path is relative to working-directory.
+          before-script-linux: cargo install --path ../../tools/uniffi-bindgen --target x86_64-unknown-linux-gnu
           args: --release --out ../../dist
 
       - name: Build sdist
