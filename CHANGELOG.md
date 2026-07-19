@@ -6,6 +6,59 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-18
+
+Additive performance work on the CONIKS directory. The `ConiksDirectory` now
+maintains an incremental branch-node cache so reading the root is O(1) amortized
+and assembling a lookup's authentication path is ~O(depth), instead of the prior
+O(N-leaves x depth) recompute on every `root()` and `lookup()` call. This is the
+CONIKS analog of the tile-proof perf work tracked for the RFC 6962 layer. No wire
+format, byte discipline, proof output, or verifier behavior changes: roots and
+proofs remain byte-for-byte identical, and every KAT vector is unchanged.
+
+### Changed
+
+- `coniks::ConiksDirectory` caches subtree hashes for branch nodes (positions
+  covering two or more leaves) and rebuilds only the O(depth) path affected by an
+  insert. `root()` reads the cached depth-0 node; `lookup()` assembles the
+  authentication path from the cache, recomputing empty defaults and singleton
+  subtrees on demand. Memory is O(N) (at most `leaves - 1` cached branch nodes),
+  not O(N x depth): empty subtrees fold to the precomputed default and singleton
+  subtrees are derived from their one leaf on demand, so neither is stored. The
+  full from-scratch recursion is retained as the byte-exact test oracle.
+
+### Added
+
+- Tests `coniks::cached_root_and_paths_match_from_scratch_oracle` and
+  `coniks::replacing_a_value_updates_the_cached_root` — lock the incremental
+  cache to byte-identical roots and authentication paths versus the from-scratch
+  `TreeHasher` recursion across successive inserts and value replacement.
+
+## [0.2.0] - 2026-07-18
+
+Adds a `Send + Sync` supertrait bound to the [`vrf::Vrf`] trait so a directory
+that owns a `Box<dyn Vrf>` can be built once and served concurrently by a
+multi-threaded operator (the server-side directory-construction path used by the
+Elixir NIF's stateful directory resource). No wire format, byte discipline, or
+proof output changes: this is purely a trait bound.
+
+### Changed (possibly breaking)
+
+- `vrf::Vrf` now requires `Send + Sync` (`pub trait Vrf: Send + Sync`). This is
+  the idiomatic, thread-safe-by-construction posture for a server-side crypto
+  strategy trait, matching the wider ecosystem's signing/verification traits. It
+  is a **possibly-breaking** change only for a downstream `impl Vrf` on a
+  `!Send`/`!Sync` type; the in-tree implementations (`Ecvrf`, `EcvrfP256`) are
+  zero-sized and satisfy it unchanged. Minor bump (pre-1.0) per SemVer, called
+  out here honestly. No frozen format, KAT vector, or public function signature
+  is affected.
+
+### Added
+
+- Test: `vrf::boxed_vrf_is_send_and_sync_across_threads` — a dependency-free
+  proof that a `Box<dyn Vrf>` moves into a spawned thread and is shared across a
+  scoped thread, locking in the new bound.
+
 ## [0.1.11] - 2026-07-15
 
 Additive, non-breaking. Exposes a **context-parameterized key-history entry

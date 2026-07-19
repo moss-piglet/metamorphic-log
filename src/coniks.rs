@@ -42,7 +42,7 @@
 //! opaque bytes to Layer 1, so it can be embedded as a Layer-0 leaf and
 //! witnessed without either layer's hashing affecting the other.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use metamorphic_crypto::hash::sha3_512_with_context;
 
@@ -130,6 +130,54 @@ fn index_bit(index: &[u8; INDEX_LEN], i: usize) -> u8 {
     (index[i / 8] >> (7 - (i % 8))) & 1
 }
 
+/// The canonical prefix key for the node at `depth` on `index`'s path: `index`'s
+/// first `depth` bits with every lower bit cleared. Two indices share this key
+/// at `depth` iff they agree on their first `depth` bits, so it uniquely names a
+/// subtree position.
+fn node_prefix(index: &[u8; INDEX_LEN], depth: usize) -> [u8; INDEX_LEN] {
+    let mut prefix = [0u8; INDEX_LEN];
+    let full = depth / 8;
+    prefix[..full].copy_from_slice(&index[..full]);
+    let rem = depth % 8;
+    if rem != 0 {
+        prefix[full] = index[full] & (0xffu8 << (8 - rem));
+    }
+    prefix
+}
+
+/// The prefix key of the *sibling* subtree at `depth + 1`: `index`'s first
+/// `depth` bits with bit `depth` set to the *opposite* of `index`'s bit at that
+/// position. This is the co-path node the verifier folds in at level `depth`.
+fn sibling_prefix(index: &[u8; INDEX_LEN], depth: usize) -> [u8; INDEX_LEN] {
+    let mut prefix = node_prefix(index, depth);
+    // `node_prefix` clears bit `depth`, so we only need to *set* it when the
+    // sibling side is the `1` branch, i.e. when `index`'s bit there is `0`.
+    if index_bit(index, depth) == 0 {
+        prefix[depth / 8] |= 1 << (7 - (depth % 8));
+    }
+    prefix
+}
+
+/// The inclusive upper bound of the index range covered by the subtree at
+/// `depth` rooted at `prefix`: the fixed first `depth` bits followed by all ones.
+/// Together with `prefix` (the lower bound) this bounds a `BTreeMap` range query
+/// over the leaves beneath the node.
+fn prefix_upper(prefix: &[u8; INDEX_LEN], depth: usize) -> [u8; INDEX_LEN] {
+    let mut upper = *prefix;
+    let full = depth / 8;
+    let rem = depth % 8;
+    let fill_from = if rem != 0 {
+        upper[full] |= 0xffu8 >> rem;
+        full + 1
+    } else {
+        full
+    };
+    for byte in &mut upper[fill_from..] {
+        *byte = 0xff;
+    }
+    upper
+}
+
 /// Shared hashing for a namespace's prefix tree: node/leaf hashing plus the
 /// precomputed empty-subtree defaults. Built identically by the directory
 /// (to construct proofs) and by the verifier (to check them), so there is a
@@ -180,6 +228,12 @@ impl TreeHasher {
 
     /// Hash of the subtree at `depth` containing exactly `leaves` (each a
     /// `(index, commitment)`), using empty-subtree shortcuts.
+    ///
+    /// This is the O(leaves x depth) from-scratch recursion. The directory no
+    /// longer calls it on the hot path — [`ConiksDirectory`] maintains an
+    /// incremental branch-node cache instead — but it is retained as the
+    /// byte-exact oracle the cache is validated against in tests.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     fn subtree(&self, depth: usize, leaves: &[(&[u8; INDEX_LEN], &Commitment)]) -> [u8; NODE_LEN] {
         if leaves.is_empty() {
             return self.empty[depth];
@@ -200,6 +254,10 @@ impl TreeHasher {
     /// Collect the authentication-path siblings for `target` from depth 0 to
     /// `TREE_DEPTH - 1`. A sibling equal to the empty default is recorded as
     /// `None` (the verifier recomputes it), keeping proofs compact.
+    ///
+    /// The O(leaves x depth) from-scratch oracle for path assembly; retained for
+    /// test validation of the directory's incremental cache (see [`subtree`]).
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     fn collect_path(
         &self,
         depth: usize,
@@ -489,6 +547,14 @@ pub struct ConiksDirectory {
     hasher: TreeHasher,
     entries: BTreeMap<Vec<u8>, DirectoryEntry>,
     leaves: BTreeMap<[u8; INDEX_LEN], Commitment>,
+    /// Incremental subtree-hash cache keyed by `(depth, node_prefix)`. It holds
+    /// **only branch nodes** — subtree positions covering two or more leaves —
+    /// which is at most `leaves - 1` entries (O(N) memory, not O(N x depth)).
+    /// Empty subtrees fold to the [`TreeHasher`] default and singleton subtrees
+    /// are recomputed on demand from their one leaf, so neither is cached. This
+    /// keeps [`ConiksDirectory::root`] O(1) and path assembly ~O(depth) while
+    /// producing byte-identical roots and proofs to the from-scratch recursion.
+    branch_cache: HashMap<(u16, [u8; INDEX_LEN]), [u8; NODE_LEN]>,
 }
 
 impl ConiksDirectory {
@@ -532,6 +598,7 @@ impl ConiksDirectory {
             hasher,
             entries: BTreeMap::new(),
             leaves: BTreeMap::new(),
+            branch_cache: HashMap::new(),
         }
     }
 
@@ -569,15 +636,91 @@ impl ConiksDirectory {
                 opening,
             },
         );
+        self.recompute_branch_path(&index);
         Ok(())
     }
 
+    /// The hash of the subtree at `depth` rooted at `prefix`, in O(1) for empty
+    /// and branch positions and O(depth) for a singleton. Byte-identical to
+    /// [`TreeHasher::subtree`] for the same set of leaves, but derived from the
+    /// leaf map plus the branch cache instead of a full recursion.
+    fn subtree_hash(&self, depth: usize, prefix: &[u8; INDEX_LEN]) -> [u8; NODE_LEN] {
+        let upper = prefix_upper(prefix, depth);
+        let mut range = self.leaves.range(*prefix..=upper);
+        match (range.next(), range.next()) {
+            // Empty subtree: the precomputed default.
+            (None, _) => self.hasher.empty[depth],
+            // Exactly one leaf: fold it up from the leaf level on demand.
+            (Some((index, commitment)), None) => self.singleton_subtree(depth, index, commitment),
+            // Two or more leaves: a branch node, which is always cached.
+            (Some(_), Some(_)) => *self
+                .branch_cache
+                .get(&(depth as u16, *prefix))
+                .expect("branch node covering >= 2 leaves must be cached"),
+        }
+    }
+
+    /// The hash of a subtree at `depth` that contains exactly one leaf: the leaf
+    /// hash folded upward with empty-default siblings from the leaf level to
+    /// `depth`. This reproduces [`TreeHasher::subtree`]'s singleton descent
+    /// without materializing the intervening chain.
+    fn singleton_subtree(
+        &self,
+        depth: usize,
+        index: &[u8; INDEX_LEN],
+        commitment: &Commitment,
+    ) -> [u8; NODE_LEN] {
+        let mut current = self.hasher.leaf_hash(index, commitment);
+        for d in (depth..TREE_DEPTH).rev() {
+            let empty_sibling = self.hasher.empty[d + 1];
+            current = if index_bit(index, d) == 0 {
+                node_hash(&self.hasher.node_label, &current, &empty_sibling)
+            } else {
+                node_hash(&self.hasher.node_label, &empty_sibling, &current)
+            };
+        }
+        current
+    }
+
+    /// Rebuild the cached branch hashes along `index`'s root-to-leaf path after
+    /// its leaf changed. Every node on the path is folded bottom-up from the leaf
+    /// using sibling subtree hashes (which are unaffected by this leaf and so are
+    /// already cached, singleton, or empty). A path node is stored in the branch
+    /// cache iff it now covers two or more leaves; otherwise any stale entry is
+    /// removed. O(depth) hashes and map operations.
+    fn recompute_branch_path(&mut self, index: &[u8; INDEX_LEN]) {
+        let mut current = {
+            let commitment = self
+                .leaves
+                .get(index)
+                .expect("leaf was just inserted for this index");
+            self.hasher.leaf_hash(index, commitment)
+        };
+        for depth in (0..TREE_DEPTH).rev() {
+            let sibling = self.subtree_hash(depth + 1, &sibling_prefix(index, depth));
+            current = if index_bit(index, depth) == 0 {
+                node_hash(&self.hasher.node_label, &current, &sibling)
+            } else {
+                node_hash(&self.hasher.node_label, &sibling, &current)
+            };
+            let prefix = node_prefix(index, depth);
+            let upper = prefix_upper(&prefix, depth);
+            let mut range = self.leaves.range(prefix..=upper);
+            let is_branch = range.next().is_some() && range.next().is_some();
+            if is_branch {
+                self.branch_cache.insert((depth as u16, prefix), current);
+            } else {
+                self.branch_cache.remove(&(depth as u16, prefix));
+            }
+        }
+    }
+
     /// The current directory root (the SHA3-512 prefix-tree root over all
-    /// commitments).
+    /// commitments). O(1) amortized: the root is the cached branch node at
+    /// depth 0 (or the empty/singleton default for tiny directories).
     #[must_use]
     pub fn root(&self) -> [u8; NODE_LEN] {
-        let leaves: Vec<_> = self.leaves.iter().collect();
-        self.hasher.subtree(0, &leaves)
+        self.subtree_hash(0, &[0u8; INDEX_LEN])
     }
 
     /// Look up `identity`, returning a presence or absence proof against the
@@ -590,9 +733,17 @@ impl ConiksDirectory {
         let vrf_proof = self.vrf.prove(&self.vrf_secret, &alpha)?;
         let index = self.vrf.proof_to_output(&vrf_proof)?.index();
 
-        let all: Vec<_> = self.leaves.iter().collect();
         let mut siblings = Vec::with_capacity(TREE_DEPTH);
-        self.hasher.collect_path(0, &index, &all, &mut siblings);
+        for depth in 0..TREE_DEPTH {
+            let sibling = self.subtree_hash(depth + 1, &sibling_prefix(&index, depth));
+            // A sibling equal to the empty default is recorded as `None`, exactly
+            // as the from-scratch `collect_path` does, so proofs are identical.
+            siblings.push(if sibling == self.hasher.empty[depth + 1] {
+                None
+            } else {
+                Some(sibling)
+            });
+        }
         let auth_path = AuthPath { siblings };
 
         match self.entries.get(identity) {
@@ -1090,6 +1241,80 @@ mod tests {
         let inherent = ConiksDirectory::root(&concrete).to_vec();
         let via_trait = Directory::root(&concrete).into_bytes();
         assert_eq!(inherent, via_trait);
+    }
+
+    #[test]
+    fn cached_root_and_paths_match_from_scratch_oracle() {
+        // The incremental branch cache must produce byte-identical roots and
+        // authentication paths to the O(N x depth) `TreeHasher` recursion, for
+        // present and absent identities and across successive inserts (which is
+        // what keeps every frozen proof byte and KAT unchanged under #103).
+        let mut d = dir();
+        let ids: Vec<Vec<u8>> = (0u64..40).map(|i| format!("id-{i}").into_bytes()).collect();
+
+        for (n, id) in ids.iter().enumerate() {
+            d.insert(id, format!("value-{n}").as_bytes()).unwrap();
+
+            // Root matches the from-scratch oracle over the current leaf set.
+            let all: Vec<_> = d.leaves.iter().collect();
+            let oracle_root = d.hasher.subtree(0, &all);
+            assert_eq!(d.root(), oracle_root, "root mismatch after {n} inserts");
+        }
+
+        let all: Vec<_> = d.leaves.iter().collect();
+        let oracle_path = |identity: &[u8]| {
+            let alpha = d.namespace.vrf_input(identity);
+            let proof = d.vrf.prove(&d.vrf_secret, &alpha).unwrap();
+            let index = d.vrf.proof_to_output(&proof).unwrap().index();
+            let mut siblings = Vec::new();
+            d.hasher.collect_path(0, &index, &all, &mut siblings);
+            AuthPath { siblings }.to_bytes()
+        };
+        let cached_path = |identity: &[u8]| match d.lookup(identity).unwrap() {
+            LookupResult::Present(p) => p.auth_path.to_bytes(),
+            LookupResult::Absent(p) => p.auth_path.to_bytes(),
+        };
+
+        // Present identity.
+        assert_eq!(cached_path(&ids[7]), oracle_path(&ids[7]));
+        // Absent identity.
+        assert_eq!(
+            cached_path(b"never-inserted"),
+            oracle_path(b"never-inserted")
+        );
+    }
+
+    #[test]
+    fn replacing_a_value_updates_the_cached_root() {
+        let mut d = dir();
+        d.insert(b"alice", b"first").unwrap();
+        d.insert(b"bob", b"bob-value").unwrap();
+        let root_before = d.root();
+
+        // Re-inserting the same identity keeps its index but changes the leaf
+        // commitment, so the cached root must move and the new value must verify.
+        d.insert(b"alice", b"second").unwrap();
+        let root_after = d.root();
+        assert_ne!(root_before, root_after);
+
+        let all: Vec<_> = d.leaves.iter().collect();
+        assert_eq!(root_after, d.hasher.subtree(0, &all));
+
+        let LookupResult::Present(proof) = d.lookup(b"alice").unwrap() else {
+            panic!("alice should be present");
+        };
+        assert_eq!(
+            verify_lookup(
+                &Ecvrf,
+                d.namespace(),
+                d.vrf_public_key(),
+                &root_after,
+                b"alice",
+                &proof,
+            )
+            .unwrap(),
+            b"second"
+        );
     }
 
     use proptest::prelude::*;
