@@ -140,7 +140,15 @@ impl fmt::Debug for VrfSecretKey {
 /// Implementations are stateless strategy objects (the keys are passed in), so
 /// a single instance can serve a whole namespace. All methods are byte-oriented
 /// and the trait is object-safe, so callers can hold a `Box<dyn Vrf>`.
-pub trait Vrf {
+///
+/// The trait requires `Send + Sync`. A VRF is a stateless strategy object built
+/// for server-side use — it is held inside a per-namespace directory
+/// ([`crate::coniks::ConiksDirectory`]) that a multi-threaded operator serves
+/// lookups from concurrently, so the construction must be shareable across
+/// threads. This matches the thread-safe-by-construction posture of the wider
+/// ecosystem's signing/verification traits, and the in-tree implementations
+/// ([`Ecvrf`], [`EcvrfP256`]) are zero-sized and trivially satisfy it.
+pub trait Vrf: Send + Sync {
     /// A stable identifier for the construction. For RFC 9381 suites this is the
     /// ciphersuite octet (e.g. `0x03` for ECVRF-edwards25519-SHA512-TAI); a
     /// future composite/hybrid construction uses its own reserved identifier.
@@ -445,6 +453,25 @@ mod tests {
         // relies on to hold a `Box<dyn Vrf>` per namespace.
         let vrf: Box<dyn Vrf> = Box::new(Ecvrf);
         assert_eq!(vrf.suite_id(), 0x03);
+    }
+
+    #[test]
+    fn boxed_vrf_is_send_and_sync_across_threads() {
+        // The `Send + Sync` supertrait bound lets a `Box<dyn Vrf>` — and thus a
+        // directory that owns one — be moved to and shared with other threads,
+        // the property a multi-threaded operator relies on to serve lookups
+        // concurrently. This is a dependency-free proof: it moves a boxed VRF
+        // into a spawned thread and shares a reference across a scoped thread.
+        let owned: Box<dyn Vrf> = Box::new(Ecvrf);
+        let handle = std::thread::spawn(move || owned.suite_id());
+        assert_eq!(handle.join().unwrap(), 0x03);
+
+        let shared: Box<dyn Vrf> = Box::new(EcvrfP256);
+        std::thread::scope(|s| {
+            let a = s.spawn(|| shared.suite_id());
+            let b = s.spawn(|| shared.suite_id());
+            assert_eq!(a.join().unwrap(), b.join().unwrap());
+        });
     }
 
     #[test]
