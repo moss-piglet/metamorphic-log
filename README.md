@@ -13,8 +13,10 @@ adds CONIKS-style index privacy via a swappable VRF.
 > **Status:** v0.1, building slice-by-slice. Implemented: the **conformance
 > core** (canonical Layer-0 leaf encoding, RFC 6962 Merkle hashing, RFC 6962 /
 > RFC 9162 inclusion + consistency verification), the **C2SP `tlog-tiles`**
-> substrate with `checkpoint` / `signed-note` parsing and classical Ed25519
-> witness verification, **additive hybrid post-quantum** checkpoint signing,
+> substrate with `checkpoint` / `signed-note` parsing, classical Ed25519
+> witness verification, and C2SP `tlog-cosignature` v1 witness cosignatures
+> (Ed25519 `0x04` and post-quantum ML-DSA-44 `0x06`), **additive hybrid
+> post-quantum** checkpoint signing,
 > **CONIKS** index privacy (swappable VRF + SHA3-512 commitments + lookup/absence
 > proofs), the signed per-namespace **policy** layer with declared == observed
 > enforcement, and the **browser verification + monitor SDK** (WASM). The leaf
@@ -175,7 +177,7 @@ It does **not** solve:
 | `keytrans`   | 3     | Experimental IETF KEYTRANS combined-tree directory (movable)|
 | `anchor`     | —     | Backend-agnostic checkpoint anchoring/attestation records   |
 | `policy`     | 0     | Signed, versioned namespace policy; declared == observed    |
-| `note`       | 2     | C2SP `signed-note` parse/verify (Ed25519 + hybrid PQ lines) |
+| `note`       | 2     | C2SP `signed-note` parse/verify (Ed25519, hybrid PQ, and `tlog-cosignature` v1 witness lines: Ed25519 `0x04` + ML-DSA-44 `0x06`) |
 | `tile`       | 2     | C2SP `tlog-tiles` coordinates / serving geometry            |
 | `wasm`       | —     | Browser verification + monitor SDK (`wasm32`-only)          |
 | `error`      | —     | Crate-wide error type                                       |

@@ -1,6 +1,6 @@
 [package]
 name = "metamorphic-log"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Tamper-evident, append-only transparency log + verification SDK for the Metamorphic platform: RFC 6962/9162 Merkle proofs, C2SP tlog-tiles substrate, witnessed checkpoints, hybrid post-quantum checkpoint signing, and CONIKS-style index privacy. Single source of truth for primitives is metamorphic-crypto."
@@ -61,7 +61,11 @@ harness = false
 # checkpoint key/signature to a posture without re-deriving any private wire tags.
 # 0.10.0 adds a standalone HKDF-SHA512 primitive (parity); unused by this crate —
 # its commitments use HMAC-SHA256.
-metamorphic-crypto = "0.10.5"
+# 0.10.7 adds the raw ML-DSA-44 (FIPS 204) interop primitives (`ml_dsa_44_sign` /
+# `ml_dsa_44_verify` / `ml_dsa_44_public_key`) that the `note` module uses to
+# produce and verify C2SP `tlog-cosignature` v1 ML-DSA-44 (post-quantum)
+# cosignature lines, the PQ sibling of the classical `ed25519_*` witness path.
+metamorphic-crypto = "0.10.7"
 thiserror = "2"
 # OS CSPRNG for sampling commitment blinding nonces (prover side). Mirrors
 # metamorphic-crypto's wasm handling: getrandom 0.2 needs its `js` backend on

@@ -6,6 +6,61 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-21
+
+Adds interoperability with the C2SP [`tlog-witness`](https://c2sp.org/tlog-witness)
+ecosystem by teaching the note layer to recognize and verify **v1 cosignatures**
+(`tlog-cosignature`, <https://c2sp.org/tlog-cosignature>) in both flavors: the
+classical **Ed25519** type (`0x04`, what deployed witnesses emit today) and the
+**post-quantum ML-DSA-44** type (`0x06`, the spec's recommended PQ cosignature).
+This is the missing cryptographic piece behind split-view protection: a verifier
+configured with a witness's key can now confirm that an independent witness
+co-signed a checkpoint, and a single note can carry the log's hybrid PQ line plus
+real Ed25519 and ML-DSA-44 witness cosignatures at once. Purely additive:
+existing Ed25519 (`0x01`) and hybrid composite lines, all wire formats, and every
+KAT vector are unchanged.
+
+Requires `metamorphic-crypto` 0.10.7, which surfaces the raw ML-DSA-44 (FIPS 204)
+interop primitives the `0x06` path uses (the PQ sibling of the `ed25519_*`
+primitives the `0x04` path uses).
+
+### Added
+
+- `note::SignatureType::CosignatureV1Ed25519` (`0x04`) — a C2SP
+  `tlog-cosignature` v1 Ed25519 cosignature. The on-wire signature blob is
+  `u64 timestamp (big-endian) || ed25519_signature[64]` (a
+  `timestamped_signature`), and the signed message is the domain-separated
+  `cosignature/v1` header, a `time <decimal>` line, and the whole cosigned note
+  body. `SignedNote::verify` now checks these lines against a matching witness
+  verifier key.
+- `note::SignatureType::CosignatureV1MlDsa44` (`0x06`) — the post-quantum C2SP
+  `tlog-cosignature` v1 ML-DSA-44 cosignature. The on-wire blob is
+  `u64 timestamp (big-endian) || ml_dsa_44_signature[2420]`, and the signed
+  message is the spec's `cosigned_message` TLS-style struct (label
+  `subtree/v1\n\0`, cosigner name, timestamp, log origin, subtree bounds, root
+  hash) built from the cosigned checkpoint's fields. Unlike the Ed25519 type it
+  commits to the cosigner name. Unknown/other cosignature types remain ignored.
+- `note::VerifierKey::new_cosignature_ed25519` /
+  `note::VerifierKey::new_cosignature_mldsa44` — build a witness verifier key
+  from a cosigner name (a schema-less URL) and Ed25519 (32-byte) or ML-DSA-44
+  (1312-byte) public key. The key id coincides with the generic signed-note key
+  id over the `0x04`/`0x06` type identifier, matching the cosignature spec's
+  `SHA-256(name || "\n" || type || pk)[:4]`. `VerifierKey::parse`/`encode`
+  round-trip both.
+- `note::sign_cosignature_ed25519` / `note::sign_cosignature_mldsa44` — produce a
+  v1 cosignature line over a note body / checkpoint at a given POSIX timestamp
+  from a raw Ed25519 or ML-DSA-44 seed. This is what a witness (including our
+  own, when acting as one) emits after verifying log consistency.
+- `note::cosignature_v1_message`, `note::COSIGNATURE_V1_HEADER`,
+  `note::cosignature_v1_mldsa44_message`, and `note::COSIGNATURE_V1_MLDSA44_LABEL`
+  — the domain-separated signed-message builders and their fixed labels, exposed
+  for tooling that needs to reproduce the exact cosigned bytes.
+- Tests locking both cosignature wire formats: sign/verify round trips, vkey
+  key-id derivation and encode/parse round trips, tampered-timestamp and
+  tampered-body rejection, and mixed checkpoints carrying the log's hybrid line
+  alongside independent Ed25519 and ML-DSA-44 witness cosignatures (all
+  verifying, each witness line also verifying on its own).
+
 ## [0.2.1] - 2026-07-18
 
 Additive performance work on the CONIKS directory. The `ConiksDirectory` now

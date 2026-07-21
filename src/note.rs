@@ -91,6 +91,21 @@
 //! pin the (deterministic) public key / `vkey` and lock a stored signature that
 //! [`SignedNote::verify`] accepts byte-for-byte.
 //!
+//! ### Witness cosignatures (`0x04` / `0x06`)
+//!
+//! The reasoning above is about our *own* log line (the hybrid composite, which
+//! deliberately does **not** reuse `0x04`/`0x06`). Independent **witnesses**
+//! co-sign our checkpoints with the C2SP `tlog-cosignature` types themselves,
+//! and we implement both as first-class, verifiable signature types:
+//! [`SignatureType::CosignatureV1Ed25519`] (`0x04`, classical — what deployed
+//! witnesses emit today) and [`SignatureType::CosignatureV1MlDsa44`] (`0x06`,
+//! post-quantum). Each is verified against its own `cosignature/v1` message
+//! framing (a timestamped Ed25519 signature over the note body, or an ML-DSA-44
+//! signature over the `cosigned_message` struct). Other assigned bytes (e.g.
+//! `0x02` ECDSA) remain unknown and are ignored. This is what lets a checkpoint
+//! carry the log's hybrid PQ line **and** real independent witness cosignatures
+//! in one note, with a verifier accepting any mix of trusted keys.
+//!
 //! [`signed-note`]: https://c2sp.org/signed-note
 //! [`metamorphic_crypto::sign`]: metamorphic_crypto::sign()
 //! [`metamorphic_crypto::verify`]: metamorphic_crypto::verify()
@@ -120,14 +135,94 @@ pub const HYBRID_SIG_IDENTIFIER: &[u8] = b"\xffmetamorphic.app/composite-mldsa-e
 /// note_text`). Changing this label is a breaking change to the hybrid line.
 pub const HYBRID_SIG_CONTEXT: &str = "metamorphic.app/signed-note/v1";
 
+/// The fixed header line that begins every C2SP `tlog-cosignature` **v1**
+/// signed message, providing domain separation
+/// (<https://c2sp.org/tlog-cosignature>).
+pub const COSIGNATURE_V1_HEADER: &str = "cosignature/v1";
+
+/// The byte length of a v1 Ed25519 cosignature's `timestamped_signature` blob
+/// (following the 4-byte key id): `u64 timestamp || ed25519_signature[64]`.
+const COSIGNATURE_V1_ED25519_BLOB_LEN: usize = 8 + 64;
+
+/// Build the C2SP `tlog-cosignature` **v1** Ed25519 signed message for a note
+/// body cosigned at `timestamp` (POSIX seconds).
+///
+/// Per the spec the message is two newline-terminated lines (the fixed
+/// `cosignature/v1` header and a `time <decimal>` line) followed by the **whole
+/// note body** of the cosigned checkpoint, including its final newline but not
+/// any signature lines. `note_text` must already be that body (as produced by
+/// [`SignedNote::text`], which retains the trailing newline).
+#[must_use]
+pub fn cosignature_v1_message(note_text: &str, timestamp: u64) -> String {
+    format!("{COSIGNATURE_V1_HEADER}\ntime {timestamp}\n{note_text}")
+}
+
+/// The fixed 12-byte label that prefixes every C2SP `tlog-cosignature` **v1
+/// ML-DSA-44** `cosigned_message` struct (`"subtree/v1\n\0"`), providing domain
+/// separation (<https://c2sp.org/tlog-cosignature>).
+pub const COSIGNATURE_V1_MLDSA44_LABEL: &[u8; 12] = b"subtree/v1\n\0";
+
+/// The byte length of a v1 ML-DSA-44 cosignature's `timestamped_signature` blob
+/// (following the 4-byte key id): `u64 timestamp || ml_dsa_44_signature[2420]`.
+const COSIGNATURE_V1_MLDSA44_BLOB_LEN: usize = 8 + 2420;
+
+/// Build the C2SP `tlog-cosignature` **v1 ML-DSA-44** `cosigned_message` bytes.
+///
+/// This is the exact message an ML-DSA-44 cosigner signs (and a verifier
+/// reconstructs), per the spec's `cosigned_message` struct: the fixed
+/// [`COSIGNATURE_V1_MLDSA44_LABEL`], the cosigner name (1-byte length prefix),
+/// the `timestamp` (big-endian `u64`), the `log_origin` (1-byte length prefix),
+/// the subtree bounds `start`/`end` (big-endian `u64`), and the 32-byte root
+/// `hash`. For a **checkpoint** cosignature `start` is `0` and `end` is the tree
+/// size.
+///
+/// # Errors
+/// Returns [`Error::MalformedNote`] if the cosigner name or log origin is empty
+/// or longer than 255 bytes (the `opaque <1..2^8-1>` bound).
+pub fn cosignature_v1_mldsa44_message(
+    cosigner_name: &str,
+    timestamp: u64,
+    log_origin: &str,
+    start: u64,
+    end: u64,
+    hash: &[u8; 32],
+) -> Result<Vec<u8>> {
+    let name = cosigner_name.as_bytes();
+    let origin = log_origin.as_bytes();
+    if name.is_empty() || name.len() > 255 {
+        return Err(Error::MalformedNote(
+            "cosigner name length out of range (1..=255)".into(),
+        ));
+    }
+    if origin.is_empty() || origin.len() > 255 {
+        return Err(Error::MalformedNote(
+            "log origin length out of range (1..=255)".into(),
+        ));
+    }
+    let mut m = Vec::with_capacity(12 + 1 + name.len() + 8 + 1 + origin.len() + 8 + 8 + 32);
+    m.extend_from_slice(COSIGNATURE_V1_MLDSA44_LABEL);
+    m.push(name.len() as u8);
+    m.extend_from_slice(name);
+    m.extend_from_slice(&timestamp.to_be_bytes());
+    m.push(origin.len() as u8);
+    m.extend_from_slice(origin);
+    m.extend_from_slice(&start.to_be_bytes());
+    m.extend_from_slice(&end.to_be_bytes());
+    m.extend_from_slice(hash);
+    Ok(m)
+}
+
 /// A note signature algorithm, identified by its C2SP `signed-note` type
 /// identifier (one or more bytes).
 ///
 /// [`SignatureType::Ed25519`] (`0x01`) is the classical, witness-compatible
 /// algorithm. [`SignatureType::MetamorphicHybrid`] (the `0xff`-escaped
-/// [`HYBRID_SIG_IDENTIFIER`]) is the additive post-quantum composite. Other
-/// assigned bytes (ECDSA `0x02`, the cosignature types, etc.) are recognized as
-/// *unknown* and their lines are ignored by verifiers.
+/// [`HYBRID_SIG_IDENTIFIER`]) is the additive post-quantum composite. The C2SP
+/// `tlog-cosignature` v1 witness types are also recognized:
+/// [`SignatureType::CosignatureV1Ed25519`] (`0x04`) and
+/// [`SignatureType::CosignatureV1MlDsa44`] (`0x06`). Other assigned bytes (e.g.
+/// ECDSA `0x02`) are recognized as *unknown* and their lines are ignored by
+/// verifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SignatureType {
     /// `0x01` — Ed25519 over the note text (RFC 8032).
@@ -135,16 +230,35 @@ pub enum SignatureType {
     /// [`HYBRID_SIG_IDENTIFIER`] — the metamorphic-crypto ML-DSA + classical
     /// composite (strict-AND), over the note text under [`HYBRID_SIG_CONTEXT`].
     MetamorphicHybrid,
+    /// `0x04` — a C2SP `tlog-cosignature` **v1 Ed25519** cosignature
+    /// (<https://c2sp.org/tlog-cosignature>). The signature line carries a
+    /// timestamped Ed25519 signature over the `cosignature/v1` domain-separated
+    /// message (see [`cosignature_v1_message`]); this is the classical,
+    /// witness-compatible cosignature real C2SP witnesses emit today. The
+    /// on-wire signature blob is `u64 timestamp (big-endian) ||
+    /// ed25519_signature[64]` (a `timestamped_signature`).
+    CosignatureV1Ed25519,
+    /// `0x06` — a C2SP `tlog-cosignature` **v1 ML-DSA-44** cosignature
+    /// (<https://c2sp.org/tlog-cosignature>). The **post-quantum**, recommended
+    /// cosignature type: FIPS 204 ML-DSA-44 over the spec's `cosigned_message`
+    /// TLS-style struct (label `subtree/v1\n\0`, cosigner name, timestamp, log
+    /// origin, subtree bounds, root hash — see [`cosignature_v1_mldsa44_message`]).
+    /// Unlike the Ed25519 type it commits to the cosigner name. The on-wire
+    /// signature blob is `u64 timestamp (big-endian) || ml_dsa_44_signature[2420]`.
+    CosignatureV1MlDsa44,
 }
 
 impl SignatureType {
-    /// The on-the-wire type identifier (one byte for Ed25519, the multi-byte
-    /// `0xff`-escaped label for the hybrid composite).
+    /// The on-the-wire type identifier (one byte for Ed25519 and the v1
+    /// cosignatures, the multi-byte `0xff`-escaped label for the hybrid
+    /// composite).
     #[must_use]
     pub fn type_identifier(self) -> &'static [u8] {
         match self {
             SignatureType::Ed25519 => &[0x01],
             SignatureType::MetamorphicHybrid => HYBRID_SIG_IDENTIFIER,
+            SignatureType::CosignatureV1Ed25519 => &[0x04],
+            SignatureType::CosignatureV1MlDsa44 => &[0x06],
         }
     }
 
@@ -154,6 +268,12 @@ impl SignatureType {
     fn detect(key: &[u8]) -> Result<(SignatureType, usize)> {
         if key.first() == Some(&0x01) {
             return Ok((SignatureType::Ed25519, 1));
+        }
+        if key.first() == Some(&0x04) {
+            return Ok((SignatureType::CosignatureV1Ed25519, 1));
+        }
+        if key.first() == Some(&0x06) {
+            return Ok((SignatureType::CosignatureV1MlDsa44, 1));
         }
         if key.starts_with(HYBRID_SIG_IDENTIFIER) {
             return Ok((
@@ -233,6 +353,73 @@ impl VerifierKey {
         })
     }
 
+    /// Build a C2SP `tlog-cosignature` **v1 Ed25519** verifier key (signature
+    /// type `0x04`) from a cosigner name and 32-byte Ed25519 public key,
+    /// computing the key id per the cosignature spec (which coincides with the
+    /// generic signed-note key id over the `0x04` type identifier).
+    ///
+    /// The cosigner `name` SHOULD be a schema-less URL identifying the witness.
+    ///
+    /// # Errors
+    /// Returns [`Error::MalformedNote`] if the name is invalid or the public key
+    /// is not 32 bytes.
+    pub fn new_cosignature_ed25519(name: &str, public_key: &[u8]) -> Result<Self> {
+        if !is_valid_name(name) {
+            return Err(Error::MalformedNote(format!("invalid key name: {name:?}")));
+        }
+        if public_key.len() != 32 {
+            return Err(Error::MalformedNote(format!(
+                "cosignature Ed25519 public key must be 32 bytes, got {}",
+                public_key.len()
+            )));
+        }
+        let key_id = compute_key_id(
+            name,
+            SignatureType::CosignatureV1Ed25519.type_identifier(),
+            public_key,
+        );
+        Ok(Self {
+            name: name.to_string(),
+            key_id,
+            sig_type: SignatureType::CosignatureV1Ed25519,
+            public_key: public_key.to_vec(),
+        })
+    }
+
+    /// Build a C2SP `tlog-cosignature` **v1 ML-DSA-44** verifier key (signature
+    /// type `0x06`) from a cosigner name and 1312-byte ML-DSA-44 public key,
+    /// computing the key id per the cosignature spec
+    /// (`SHA-256(name || "\n" || 0x06 || pk)[:4]`, which coincides with the
+    /// generic signed-note key id over the `0x06` type identifier).
+    ///
+    /// The cosigner `name` SHOULD be a schema-less URL identifying the witness.
+    ///
+    /// # Errors
+    /// Returns [`Error::MalformedNote`] if the name is invalid or the public key
+    /// is not 1312 bytes.
+    pub fn new_cosignature_mldsa44(name: &str, public_key: &[u8]) -> Result<Self> {
+        if !is_valid_name(name) {
+            return Err(Error::MalformedNote(format!("invalid key name: {name:?}")));
+        }
+        if public_key.len() != 1312 {
+            return Err(Error::MalformedNote(format!(
+                "cosignature ML-DSA-44 public key must be 1312 bytes, got {}",
+                public_key.len()
+            )));
+        }
+        let key_id = compute_key_id(
+            name,
+            SignatureType::CosignatureV1MlDsa44.type_identifier(),
+            public_key,
+        );
+        Ok(Self {
+            name: name.to_string(),
+            key_id,
+            sig_type: SignatureType::CosignatureV1MlDsa44,
+            public_key: public_key.to_vec(),
+        })
+    }
+
     /// Parse a verifier key string `<name>+<hex key id>+<base64(type||key)>`.
     ///
     /// # Errors
@@ -269,6 +456,12 @@ impl VerifierKey {
         let public_key = &key[id_len..];
         match sig_type {
             SignatureType::Ed25519 if public_key.len() != 32 => return Err(malformed()),
+            SignatureType::CosignatureV1Ed25519 if public_key.len() != 32 => {
+                return Err(malformed());
+            }
+            SignatureType::CosignatureV1MlDsa44 if public_key.len() != 1312 => {
+                return Err(malformed());
+            }
             SignatureType::MetamorphicHybrid if public_key.is_empty() => return Err(malformed()),
             _ => {}
         }
@@ -335,7 +528,9 @@ impl VerifierKey {
     pub fn hybrid_posture_tag(&self) -> Option<u8> {
         match self.sig_type {
             SignatureType::MetamorphicHybrid => self.public_key.first().copied(),
-            SignatureType::Ed25519 => None,
+            SignatureType::Ed25519
+            | SignatureType::CosignatureV1Ed25519
+            | SignatureType::CosignatureV1MlDsa44 => None,
         }
     }
 }
@@ -537,6 +732,75 @@ impl SignedNote {
                     )
                     .unwrap_or(false)
                 }
+                SignatureType::CosignatureV1Ed25519 => {
+                    // C2SP tlog-cosignature v1: the on-wire blob is
+                    // `u64 timestamp (big-endian) || ed25519_signature[64]`, and
+                    // the signed message is the domain-separated
+                    // `cosignature/v1` header + `time <ts>` line + the whole
+                    // note body (see `cosignature_v1_message`). A wrong-length
+                    // blob is a verification failure, never a panic.
+                    if sig.signature.len() != COSIGNATURE_V1_ED25519_BLOB_LEN {
+                        false
+                    } else {
+                        let timestamp = u64::from_be_bytes([
+                            sig.signature[0],
+                            sig.signature[1],
+                            sig.signature[2],
+                            sig.signature[3],
+                            sig.signature[4],
+                            sig.signature[5],
+                            sig.signature[6],
+                            sig.signature[7],
+                        ]);
+                        let message = cosignature_v1_message(&self.text, timestamp);
+                        metamorphic_crypto::ed25519_verify(
+                            &key.public_key,
+                            message.as_bytes(),
+                            &sig.signature[8..],
+                        )
+                        .unwrap_or(false)
+                    }
+                }
+                SignatureType::CosignatureV1MlDsa44 => {
+                    // C2SP tlog-cosignature v1 (ML-DSA-44): the on-wire blob is
+                    // `u64 timestamp (big-endian) || ml_dsa_44_signature[2420]`,
+                    // and the signed message is the `cosigned_message` struct
+                    // over the cosigned checkpoint's fields. The note body must
+                    // parse as a checkpoint (origin/size/root); anything else is
+                    // a verification failure, never a panic.
+                    if sig.signature.len() != COSIGNATURE_V1_MLDSA44_BLOB_LEN {
+                        false
+                    } else {
+                        let timestamp = u64::from_be_bytes([
+                            sig.signature[0],
+                            sig.signature[1],
+                            sig.signature[2],
+                            sig.signature[3],
+                            sig.signature[4],
+                            sig.signature[5],
+                            sig.signature[6],
+                            sig.signature[7],
+                        ]);
+                        match crate::checkpoint::Checkpoint::parse(&self.text).and_then(|cp| {
+                            cosignature_v1_mldsa44_message(
+                                &key.name,
+                                timestamp,
+                                cp.origin(),
+                                0,
+                                cp.size(),
+                                cp.root_hash(),
+                            )
+                        }) {
+                            Ok(message) => metamorphic_crypto::ml_dsa_44_verify(
+                                &key.public_key,
+                                &message,
+                                &sig.signature[8..],
+                            )
+                            .unwrap_or(false),
+                            Err(_) => false,
+                        }
+                    }
+                }
             };
 
             if ok {
@@ -613,6 +877,100 @@ pub fn sign_hybrid(text: &str, name: &str, secret_key_b64: &str) -> Result<Signa
     let sig_b64 = metamorphic_crypto::sign(text.as_bytes(), HYBRID_SIG_CONTEXT, secret_key_b64)
         .map_err(|e| Error::HybridSignature(format!("hybrid signing failed: {e}")))?;
     let signature = base64_decode(&sig_b64)?;
+    Ok(Signature {
+        name: name.to_string(),
+        key_id,
+        signature,
+    })
+}
+
+/// Produce a C2SP `tlog-cosignature` **v1 Ed25519** cosignature [`Signature`]
+/// line over `note_text` (the whole cosigned note body, ending in a newline),
+/// at `timestamp` (POSIX seconds), from a raw 32-byte Ed25519 `seed`.
+///
+/// This is what a witness (including our own, when acting as one) emits after it
+/// has verified the log's consistency: the returned line can be appended to the
+/// note's signature block and later checked with a matching
+/// [`VerifierKey::new_cosignature_ed25519`].
+///
+/// # Errors
+/// Returns [`Error::MalformedNote`] for an invalid name, and propagates a
+/// primitive error if `seed` is not 32 bytes.
+pub fn sign_cosignature_ed25519(
+    note_text: &str,
+    name: &str,
+    seed: &[u8],
+    timestamp: u64,
+) -> Result<Signature> {
+    if !is_valid_name(name) {
+        return Err(Error::MalformedNote(format!("invalid key name: {name:?}")));
+    }
+    let public_key = metamorphic_crypto::ed25519_public_key(seed)
+        .map_err(|e| Error::MalformedNote(format!("invalid Ed25519 seed: {e}")))?;
+    let key_id = compute_key_id(
+        name,
+        SignatureType::CosignatureV1Ed25519.type_identifier(),
+        &public_key,
+    );
+    let message = cosignature_v1_message(note_text, timestamp);
+    let ed_sig = metamorphic_crypto::ed25519_sign(seed, message.as_bytes())
+        .map_err(|e| Error::MalformedNote(format!("Ed25519 signing failed: {e}")))?;
+    let mut signature = Vec::with_capacity(COSIGNATURE_V1_ED25519_BLOB_LEN);
+    signature.extend_from_slice(&timestamp.to_be_bytes());
+    signature.extend_from_slice(&ed_sig);
+    Ok(Signature {
+        name: name.to_string(),
+        key_id,
+        signature,
+    })
+}
+
+/// Produce a C2SP `tlog-cosignature` **v1 ML-DSA-44** cosignature [`Signature`]
+/// line over the checkpoint in `note_text` (the whole cosigned note body, whose
+/// first three lines are the checkpoint origin/size/root), at `timestamp`
+/// (POSIX seconds), from a raw 32-byte ML-DSA-44 `seed`.
+///
+/// This is the post-quantum sibling of [`sign_cosignature_ed25519`]: what a
+/// witness emits after verifying log consistency when it co-signs with
+/// ML-DSA-44. The returned line can be appended to the note's signature block
+/// and later checked with a matching [`VerifierKey::new_cosignature_mldsa44`].
+/// Because ML-DSA signing is hedged, the bytes are not reproducible (but
+/// verification is deterministic).
+///
+/// # Errors
+/// Returns [`Error::MalformedNote`] for an invalid name or a `note_text` that
+/// does not parse as a checkpoint, and propagates a primitive error if `seed` is
+/// not 32 bytes.
+pub fn sign_cosignature_mldsa44(
+    note_text: &str,
+    name: &str,
+    seed: &[u8],
+    timestamp: u64,
+) -> Result<Signature> {
+    if !is_valid_name(name) {
+        return Err(Error::MalformedNote(format!("invalid key name: {name:?}")));
+    }
+    let checkpoint = crate::checkpoint::Checkpoint::parse(note_text)?;
+    let public_key = metamorphic_crypto::ml_dsa_44_public_key(seed)
+        .map_err(|e| Error::MalformedNote(format!("invalid ML-DSA-44 seed: {e}")))?;
+    let key_id = compute_key_id(
+        name,
+        SignatureType::CosignatureV1MlDsa44.type_identifier(),
+        &public_key,
+    );
+    let message = cosignature_v1_mldsa44_message(
+        name,
+        timestamp,
+        checkpoint.origin(),
+        0,
+        checkpoint.size(),
+        checkpoint.root_hash(),
+    )?;
+    let ml_sig = metamorphic_crypto::ml_dsa_44_sign(seed, &message)
+        .map_err(|e| Error::MalformedNote(format!("ML-DSA-44 signing failed: {e}")))?;
+    let mut signature = Vec::with_capacity(COSIGNATURE_V1_MLDSA44_BLOB_LEN);
+    signature.extend_from_slice(&timestamp.to_be_bytes());
+    signature.extend_from_slice(&ml_sig);
     Ok(Signature {
         name: name.to_string(),
         key_id,
@@ -808,5 +1166,215 @@ mod tests {
         );
         // A PQ-aware verifier with both keys accepts both lines.
         assert_eq!(note.verify(&[ed_vkey, pq_vkey]).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn cosignature_v1_vkey_round_trips_and_matches_key_id() {
+        let (_seed, pk) = metamorphic_crypto::ed25519_generate_keypair();
+        let vkey = VerifierKey::new_cosignature_ed25519("witness.example.com/w1", &pk).unwrap();
+        assert_eq!(vkey.signature_type(), SignatureType::CosignatureV1Ed25519);
+        assert_eq!(vkey.hybrid_posture_tag(), None);
+        // Type identifier is the single 0x04 byte.
+        assert_eq!(
+            SignatureType::CosignatureV1Ed25519.type_identifier(),
+            &[0x04]
+        );
+        // The cosignature key id coincides with the generic signed-note key id
+        // over the 0x04 type identifier (spec: SHA-256(name||0x0A||0x04||pk)[:4]).
+        let recomputed = compute_key_id("witness.example.com/w1", &[0x04], &pk);
+        assert_eq!(vkey.key_id(), recomputed);
+        // vkey encodes and re-parses byte-for-byte.
+        assert_eq!(VerifierKey::parse(&vkey.encode()).unwrap(), vkey);
+    }
+
+    #[test]
+    fn cosignature_v1_sign_and_verify_round_trip() {
+        // A checkpoint body is a note whose text is the tree head (ending in a
+        // newline). A witness cosigns that whole body.
+        let (seed, pk) = metamorphic_crypto::ed25519_generate_keypair();
+        let text =
+            "example.com/behind-the-sofa\n20852163\nCsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=\n"
+                .to_string();
+        let timestamp = 1_679_315_147u64;
+
+        let sig =
+            sign_cosignature_ed25519(&text, "witness.example.com/w1", &seed, timestamp).unwrap();
+        // On-wire blob is `u64 timestamp (big-endian) || ed25519_signature[64]`.
+        assert_eq!(sig.signature().len(), 8 + 64);
+        assert_eq!(&sig.signature()[..8], &timestamp.to_be_bytes());
+
+        let note = SignedNote::new(text, vec![sig]).unwrap();
+        let vkey = VerifierKey::new_cosignature_ed25519("witness.example.com/w1", &pk).unwrap();
+        assert_eq!(note.verify(&[vkey]).unwrap().len(), 1);
+
+        // Parse(marshal(x)) == x round trip across the timestamped blob.
+        let reparsed = SignedNote::parse(&note.marshal()).unwrap();
+        assert_eq!(reparsed, note);
+    }
+
+    #[test]
+    fn cosignature_v1_tampered_timestamp_or_body_is_rejected() {
+        let (seed, pk) = metamorphic_crypto::ed25519_generate_keypair();
+        let text = "example.com/log\n42\ncm9vdA==\n".to_string();
+        let sig = sign_cosignature_ed25519(&text, "witness.example.com/w1", &seed, 1000).unwrap();
+        let vkey = VerifierKey::new_cosignature_ed25519("witness.example.com/w1", &pk).unwrap();
+
+        // Flip the encoded timestamp: the reconstructed message no longer matches
+        // what was signed, so verification fails.
+        let mut bad_blob = sig.signature().to_vec();
+        bad_blob[7] ^= 0x01;
+        let bad_sig = Signature {
+            name: sig.name().to_string(),
+            key_id: sig.key_id(),
+            signature: bad_blob,
+        };
+        let bad_note = SignedNote::new(text.clone(), vec![bad_sig]).unwrap();
+        assert!(matches!(
+            bad_note.verify(std::slice::from_ref(&vkey)),
+            Err(Error::InvalidSignature { .. })
+        ));
+
+        // Tampering the cosigned body also fails.
+        let forged =
+            SignedNote::new("example.com/log\n43\nZXZpbA==\n".to_string(), vec![sig]).unwrap();
+        assert!(matches!(
+            forged.verify(&[vkey]),
+            Err(Error::InvalidSignature { .. })
+        ));
+    }
+
+    #[test]
+    fn checkpoint_carries_log_line_and_witness_cosignature() {
+        // The real "witnessed checkpoint" shape: the log's own hybrid line plus
+        // one independent witness cosignature, both over the same body. A
+        // verifier trusting both keys sees two verified signatures; a verifier
+        // trusting only the witness still accepts (quorum of one witness).
+        let text = "origin.example/log\n9\ncm9vdA==\n".to_string();
+        let kp = metamorphic_crypto::generate_signing_keypair();
+        let log_pk = base64_decode(&kp.public_key).unwrap();
+        let (wseed, wpk) = metamorphic_crypto::ed25519_generate_keypair();
+
+        let log_sig = sign_hybrid(&text, "origin.example/log", &kp.secret_key).unwrap();
+        let wit_sig =
+            sign_cosignature_ed25519(&text, "witness.example.com/w1", &wseed, 1_700_000_000)
+                .unwrap();
+        let note = SignedNote::new(text, vec![log_sig, wit_sig]).unwrap();
+
+        let log_vkey = VerifierKey::new_hybrid("origin.example/log", &log_pk).unwrap();
+        let wit_vkey =
+            VerifierKey::new_cosignature_ed25519("witness.example.com/w1", &wpk).unwrap();
+
+        assert_eq!(
+            note.verify(&[log_vkey.clone(), wit_vkey.clone()])
+                .unwrap()
+                .len(),
+            2
+        );
+        // Witness-only verifier still accepts (independent split-view protection).
+        assert_eq!(note.verify(&[wit_vkey]).unwrap().len(), 1);
+        // Marshal round-trips the mixed signature block.
+        assert_eq!(SignedNote::parse(&note.marshal()).unwrap(), note);
+    }
+
+    #[test]
+    fn cosignature_v1_mldsa44_vkey_round_trips_and_matches_key_id() {
+        let (_seed, pk) = metamorphic_crypto::ml_dsa_44_generate_keypair();
+        let vkey = VerifierKey::new_cosignature_mldsa44("witness.example.com/pq", &pk).unwrap();
+        assert_eq!(vkey.signature_type(), SignatureType::CosignatureV1MlDsa44);
+        assert_eq!(vkey.hybrid_posture_tag(), None);
+        assert_eq!(
+            SignatureType::CosignatureV1MlDsa44.type_identifier(),
+            &[0x06]
+        );
+        let recomputed = compute_key_id("witness.example.com/pq", &[0x06], &pk);
+        assert_eq!(vkey.key_id(), recomputed);
+        assert_eq!(VerifierKey::parse(&vkey.encode()).unwrap(), vkey);
+    }
+
+    #[test]
+    fn cosignature_v1_mldsa44_sign_and_verify_round_trip() {
+        let (seed, pk) = metamorphic_crypto::ml_dsa_44_generate_keypair();
+        let text =
+            "example.com/behind-the-sofa\n20852163\nCsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=\n"
+                .to_string();
+        let timestamp = 1_679_315_147u64;
+
+        let sig =
+            sign_cosignature_mldsa44(&text, "witness.example.com/pq", &seed, timestamp).unwrap();
+        // On-wire blob is `u64 timestamp (big-endian) || ml_dsa_44_signature[2420]`.
+        assert_eq!(sig.signature().len(), 8 + 2420);
+        assert_eq!(&sig.signature()[..8], &timestamp.to_be_bytes());
+
+        let note = SignedNote::new(text, vec![sig]).unwrap();
+        let vkey = VerifierKey::new_cosignature_mldsa44("witness.example.com/pq", &pk).unwrap();
+        assert_eq!(note.verify(&[vkey]).unwrap().len(), 1);
+
+        let reparsed = SignedNote::parse(&note.marshal()).unwrap();
+        assert_eq!(reparsed, note);
+    }
+
+    #[test]
+    fn cosignature_v1_mldsa44_tampered_body_or_timestamp_is_rejected() {
+        let (seed, pk) = metamorphic_crypto::ml_dsa_44_generate_keypair();
+        let root = "CsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=";
+        let text = format!("example.com/log\n42\n{root}\n");
+        let sig = sign_cosignature_mldsa44(&text, "witness.example.com/pq", &seed, 1000).unwrap();
+        let vkey = VerifierKey::new_cosignature_mldsa44("witness.example.com/pq", &pk).unwrap();
+
+        // Flip the encoded timestamp: the cosigned_message no longer matches.
+        let mut bad_blob = sig.signature().to_vec();
+        bad_blob[7] ^= 0x01;
+        let bad_sig = Signature {
+            name: sig.name().to_string(),
+            key_id: sig.key_id(),
+            signature: bad_blob,
+        };
+        let bad_note = SignedNote::new(text.clone(), vec![bad_sig]).unwrap();
+        assert!(matches!(
+            bad_note.verify(std::slice::from_ref(&vkey)),
+            Err(Error::InvalidSignature { .. })
+        ));
+
+        // Tampering the checkpoint body (size line -> different `end`) also fails.
+        let forged = SignedNote::new(format!("example.com/log\n43\n{root}\n"), vec![sig]).unwrap();
+        assert!(matches!(
+            forged.verify(&[vkey]),
+            Err(Error::InvalidSignature { .. })
+        ));
+    }
+
+    #[test]
+    fn checkpoint_carries_hybrid_line_and_both_cosignature_types() {
+        // The full "PQ-witnessed checkpoint" shape: the log's hybrid line plus a
+        // classical Ed25519 witness cosignature AND a post-quantum ML-DSA-44
+        // witness cosignature, all over the same checkpoint body.
+        let text =
+            "origin.example/log\n9\nCsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=\n".to_string();
+        let kp = metamorphic_crypto::generate_signing_keypair();
+        let log_pk = base64_decode(&kp.public_key).unwrap();
+        let (ed_seed, ed_pk) = metamorphic_crypto::ed25519_generate_keypair();
+        let (pq_seed, pq_pk) = metamorphic_crypto::ml_dsa_44_generate_keypair();
+
+        let log_sig = sign_hybrid(&text, "origin.example/log", &kp.secret_key).unwrap();
+        let ed_wit =
+            sign_cosignature_ed25519(&text, "witness.example/ed", &ed_seed, 1_700_000_000).unwrap();
+        let pq_wit =
+            sign_cosignature_mldsa44(&text, "witness.example/pq", &pq_seed, 1_700_000_000).unwrap();
+        let note = SignedNote::new(text, vec![log_sig, ed_wit, pq_wit]).unwrap();
+
+        let log_vkey = VerifierKey::new_hybrid("origin.example/log", &log_pk).unwrap();
+        let ed_vkey = VerifierKey::new_cosignature_ed25519("witness.example/ed", &ed_pk).unwrap();
+        let pq_vkey = VerifierKey::new_cosignature_mldsa44("witness.example/pq", &pq_pk).unwrap();
+
+        // All three verify when all keys are trusted.
+        assert_eq!(
+            note.verify(&[log_vkey, ed_vkey, pq_vkey.clone()])
+                .unwrap()
+                .len(),
+            3
+        );
+        // A PQ-only client (trusting just the ML-DSA-44 witness) still accepts.
+        assert_eq!(note.verify(&[pq_vkey]).unwrap().len(), 1);
+        assert_eq!(SignedNote::parse(&note.marshal()).unwrap(), note);
     }
 }
