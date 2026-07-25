@@ -6,6 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-25
+
+Adds **dual-line checkpoint signing** for out-of-the-box interop with the
+deployed C2SP witness ecosystem. Stock witness software (omniwitness,
+armored-witness, sigsum) verifies classical Ed25519 (`0x01`) log lines only,
+so a checkpoint carrying just the hybrid post-quantum line is invisible to it.
+`sign_checkpoint_dual` mints both lines from the ONE composite secret key in a
+single call: the additive hybrid line for post-quantum verifiers, plus a plain
+Ed25519 `0x01` line (signed by the composite key's classical half, under the
+same key name) for Ed25519-only witnesses. `signed-note` is explicitly
+multi-signature with unknown-key-ignored, so the dual note stays backward
+compatible with single-line consumers in both directions, and the two uses of
+the same classical key stay domain-separated (bare note text vs the hybrid
+signing context). Purely additive: `sign_checkpoint_hybrid`, all wire formats,
+and every KAT vector are unchanged.
+
+### Added
+
+- `checkpoint::sign_checkpoint_dual` — build a checkpoint body and sign it
+  twice with one `Suite::Hybrid` composite secret key (hybrid line + Ed25519
+  `0x01` line, same name, distinct key ids), returning the complete dual-line
+  `signed-note` text ready to publish. Composite keys without an Ed25519
+  classical half (matched-suite Ed448/P-521, pure-PQ) are rejected.
+- `note::VerifierKey::new_ed25519_from_hybrid` — derive the classical Ed25519
+  (`0x01`) verifier key from a `Suite::Hybrid` composite public key. The
+  witness registration bundle for an origin is its hybrid vkey plus this
+  derived vkey; the derivation is deterministic and KAT-pinned.
+- WASM export `checkpointSignDual` — the browser producer path signs dual-line
+  checkpoints in one call.
+- `note::Signature::marshal_line` — serialize a signature as a single
+  `signed-note` signature line (`— <name> <base64(key id || signature)>`), the
+  shape a cosigner returns to a log and a log appends to a signature block.
+- Tests: dual round trip, each line verifying independently against its own
+  vkey, same-name/distinct-key-id shape, tamper rejection, non-Hybrid-suite
+  rejection, and a pinned deterministic derived-`0x01`-vkey KAT.
+
 ## [0.3.0] - 2026-07-21
 
 Adds interoperability with the C2SP [`tlog-witness`](https://c2sp.org/tlog-witness)
