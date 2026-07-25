@@ -13,8 +13,10 @@
 //! Alongside the original verification/monitor surface, this SDK also surfaces
 //! the **producer** helpers a browser client needs to sign its own C2SP
 //! artifacts: classical Ed25519 and additive hybrid PQ note signing
-//! ([`note_sign_ed25519`], [`note_sign_hybrid`]), a one-call checkpoint signer
-//! ([`checkpoint_sign_hybrid`]), verifier-key encoding ([`vkey_encode_hybrid`],
+//! ([`note_sign_ed25519`], [`note_sign_hybrid`]), one-call checkpoint signers
+//! ([`checkpoint_sign_hybrid`], and [`checkpoint_sign_dual`] for the dual-line
+//! hybrid + Ed25519 `0x01` witness-interop format), verifier-key encoding
+//! ([`vkey_encode_hybrid`],
 //! [`vkey_encode_ed25519`]), and namespace-policy signing
 //! ([`signed_policy_sign`]). Secret keys never leave the audited
 //! metamorphic-crypto primitives; this layer only marshals base64/text.
@@ -349,6 +351,28 @@ pub fn checkpoint_sign_hybrid(
     secret_key_b64: &str,
 ) -> Result<String, JsValue> {
     checkpoint::sign_checkpoint_hybrid(origin, size, root_b64, name, secret_key_b64).map_err(to_js)
+}
+
+/// Build a checkpoint body and sign it twice with ONE hybrid PQ composite
+/// secret key — the additive hybrid line plus a classical Ed25519 (`0x01`)
+/// line under the same key name — returning the complete dual-line C2SP
+/// `signed-note` text ready to publish.
+///
+/// Arguments match [`checkpoint_sign_hybrid`]. The dual note lets stock
+/// Ed25519-only C2SP witnesses verify and co-sign the checkpoint while our own
+/// verifiers keep checking the hybrid line; both lines are produced in this
+/// one call. Wraps [`crate::checkpoint::sign_checkpoint_dual`]. Throws on a
+/// malformed checkpoint (empty origin, non-32-byte root), a non-`Suite::Hybrid`
+/// composite key (no Ed25519 half), or a signing failure.
+#[wasm_bindgen(js_name = "checkpointSignDual")]
+pub fn checkpoint_sign_dual(
+    origin: &str,
+    size: u64,
+    root_b64: &str,
+    name: &str,
+    secret_key_b64: &str,
+) -> Result<String, JsValue> {
+    checkpoint::sign_checkpoint_dual(origin, size, root_b64, name, secret_key_b64).map_err(to_js)
 }
 
 /// Encode a hybrid composite verifier key (`vkey`) from a key name and the

@@ -353,6 +353,29 @@ impl VerifierKey {
         })
     }
 
+    /// Build a classical Ed25519 verifier key from the Ed25519 half of a
+    /// metamorphic-crypto **standard-suite** (`Suite::Hybrid`) composite public
+    /// key (`tag || ed25519_pk(32) || ml_dsa_pk`), computing the key id per the
+    /// spec over the `0x01` type identifier.
+    ///
+    /// This is the key a stock C2SP witness (Ed25519-only) needs to verify the
+    /// `0x01` line of a dual-signed checkpoint (see
+    /// [`crate::checkpoint::sign_checkpoint_dual`]); the witness registration
+    /// bundle for an origin is its hybrid vkey plus this derived Ed25519 vkey.
+    /// The `(Suite, SecurityLevel)` posture and the full composite length are
+    /// authenticated by [`metamorphic_crypto::signature_posture`] (the
+    /// authoritative layout decode lives in metamorphic-crypto), so the fixed
+    /// `1..33` slice is always in bounds. Suites without an Ed25519 classical
+    /// half (matched Ed448/P-521, pure-PQ) are rejected.
+    ///
+    /// # Errors
+    /// Returns [`Error::MalformedNote`] if the name is invalid, or
+    /// [`Error::HybridSignature`] if the composite key does not decode to a
+    /// `Suite::Hybrid` key.
+    pub fn new_ed25519_from_hybrid(name: &str, hybrid_public_key: &[u8]) -> Result<Self> {
+        hybrid_ed25519_half(hybrid_public_key).and_then(|pk| Self::new_ed25519(name, pk))
+    }
+
     /// Build a C2SP `tlog-cosignature` **v1 Ed25519** verifier key (signature
     /// type `0x04`) from a cosigner name and 32-byte Ed25519 public key,
     /// computing the key id per the cosignature spec (which coincides with the
@@ -563,6 +586,17 @@ impl Signature {
         &self.signature
     }
 
+    /// Serialize this signature as a single `signed-note` signature line:
+    /// `— <name> <base64(key id || signature)>` (no trailing newline).
+    ///
+    /// This is the line a cosigner (e.g. a C2SP `tlog-witness`) returns to a
+    /// log and the line a log appends to a note's signature block; the note
+    /// wire format accepts the lines in any order.
+    #[must_use]
+    pub fn marshal_line(&self) -> String {
+        format!("{SIG_PREFIX}{} {}", self.name, self.to_base64())
+    }
+
     /// The base64 signature blob (`key id || signature`) as it appears on the
     /// wire.
     #[must_use]
@@ -674,10 +708,7 @@ impl SignedNote {
         out.push_str(&self.text);
         out.push('\n');
         for sig in &self.signatures {
-            out.push_str(SIG_PREFIX);
-            out.push_str(&sig.name);
-            out.push(' ');
-            out.push_str(&sig.to_base64());
+            out.push_str(&sig.marshal_line());
             out.push('\n');
         }
         out
@@ -978,6 +1009,69 @@ pub fn sign_cosignature_mldsa44(
     })
 }
 
+/// The byte length of the Ed25519 half (seed or public key) in a
+/// `Suite::Hybrid` composite key.
+const HYBRID_ED25519_HALF_LEN: usize = 32;
+
+/// Extract the 32-byte Ed25519 public key from a `Suite::Hybrid` composite
+/// public key (`tag || ed25519_pk(32) || ml_dsa_pk`), rejecting every other
+/// suite.
+///
+/// The posture check delegates to [`metamorphic_crypto::signature_posture`]
+/// (the authoritative layout decode), which also validates the full composite
+/// length for the decoded posture, so the `1..33` slice is always in bounds
+/// once it succeeds.
+fn hybrid_ed25519_half(hybrid_public_key: &[u8]) -> Result<&[u8]> {
+    let (suite, _level) = metamorphic_crypto::signature_posture(&base64_encode(hybrid_public_key))
+        .map_err(|e| Error::HybridSignature(format!("invalid hybrid public key: {e}")))?;
+    if suite != metamorphic_crypto::Suite::Hybrid {
+        return Err(Error::HybridSignature(format!(
+            "no Ed25519 half: composite key is {suite:?}, want Suite::Hybrid (Ed25519 classical)"
+        )));
+    }
+    Ok(&hybrid_public_key[1..1 + HYBRID_ED25519_HALF_LEN])
+}
+
+/// Decompose a metamorphic-crypto `Suite::Hybrid` composite secret key (base64
+/// `tag || ed25519_seed(32) || ml_dsa_seed(32)`, 65 bytes), returning the raw
+/// 32-byte Ed25519 seed half.
+///
+/// Used to mint the classical `0x01` line of a dual-signed checkpoint from the
+/// same composite key that mints the hybrid line (see
+/// [`crate::checkpoint::sign_checkpoint_dual`]). The two uses are
+/// domain-separated: the Ed25519 line signs the bare note text (RFC 8032) while
+/// the hybrid line signs under [`HYBRID_SIG_CONTEXT`]. The suite is
+/// authenticated via [`metamorphic_crypto::derive_public_key`] +
+/// [`metamorphic_crypto::signature_posture`]; suites without an Ed25519
+/// classical half are rejected.
+///
+/// # Errors
+/// Returns [`Error::HybridSignature`] if the key is undecodable, underivable,
+/// not a `Suite::Hybrid` key, or not 65 bytes once decoded.
+pub(crate) fn hybrid_secret_ed25519_seed(secret_key_b64: &str) -> Result<[u8; 32]> {
+    let public_key_b64 = metamorphic_crypto::derive_public_key(secret_key_b64)
+        .map_err(|e| Error::HybridSignature(format!("invalid hybrid secret key: {e}")))?;
+    let (suite, _level) = metamorphic_crypto::signature_posture(&public_key_b64)
+        .map_err(|e| Error::HybridSignature(format!("invalid hybrid public key: {e}")))?;
+    if suite != metamorphic_crypto::Suite::Hybrid {
+        return Err(Error::HybridSignature(format!(
+            "no Ed25519 half: composite key is {suite:?}, want Suite::Hybrid (Ed25519 classical)"
+        )));
+    }
+    let sk = base64_decode(secret_key_b64)?;
+    // Suite::Hybrid secret layout is fixed at every level:
+    // tag(1) || ed25519_seed(32) || ml_dsa_seed(32) = 65 bytes.
+    if sk.len() != 1 + HYBRID_ED25519_HALF_LEN + 32 {
+        return Err(Error::HybridSignature(format!(
+            "hybrid secret key must be 65 bytes (tag || ed25519 seed || ml-dsa seed), got {}",
+            sk.len()
+        )));
+    }
+    let mut seed = [0u8; HYBRID_ED25519_HALF_LEN];
+    seed.copy_from_slice(&sk[1..1 + HYBRID_ED25519_HALF_LEN]);
+    Ok(seed)
+}
+
 /// `keyHash` over the full encoded key material (`type identifier || public
 /// key`): the big-endian `u32` of `SHA-256(name || 0x0A || key)[:4]`.
 fn key_hash(name: &str, key: &[u8]) -> u32 {
@@ -1034,6 +1128,19 @@ mod tests {
 
         // Marshalling reproduces the exact wire bytes.
         assert_eq!(note.marshal(), SPEC_NOTE);
+    }
+
+    #[test]
+    fn signature_marshal_line_reproduces_the_spec_line() {
+        let note = SignedNote::parse(SPEC_NOTE).unwrap();
+        let line = note.signatures()[0].marshal_line();
+        assert_eq!(
+            line,
+            "— example.com/foo Uw2QOkn8srV1yJGh2VYRlL1Tnagv1YEq6TfXppzi2ONncAlTgK7Ztg1ERYNZXsYjOBH3mFXmRKuwHjG1Yu72IneyaQM="
+        );
+        // A note rebuilt from its body and the marshaled line is byte-identical.
+        let rebuilt = format!("{}\n{line}\n", note.text());
+        assert_eq!(rebuilt, SPEC_NOTE);
     }
 
     #[test]

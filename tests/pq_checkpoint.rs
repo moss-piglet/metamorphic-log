@@ -127,6 +127,84 @@ fn hybrid_identifier_is_the_0xff_escape() {
 }
 
 // ===========================================================================
+// 2. Dual-line checkpoints (hybrid + classical Ed25519 0x01) — witness interop
+// ===========================================================================
+
+/// The classical Ed25519 (`0x01`) verifier key derived from [`HYBRID_KAT_SK`]'s
+/// composite public key. `derive_public_key` is deterministic, so this string
+/// is stable; it is the vkey a stock Ed25519-only C2SP witness would be
+/// configured with for the `metamorphic.app/kat` origin.
+const HYBRID_KAT_ED25519_VKEY: &str =
+    "metamorphic.app/kat+ea631ef7+AdBKsjJ0K7SrOhNovUYV5ObQIkq3GgFrr4UgozLJd4c3";
+
+#[test]
+fn dual_line_ed25519_vkey_derives_deterministically_from_composite_key() {
+    let pk_b64 = metamorphic_crypto::derive_public_key(HYBRID_KAT_SK).unwrap();
+    let pk = metamorphic_crypto::b64::decode(&pk_b64).unwrap();
+    let vkey = VerifierKey::new_ed25519_from_hybrid("metamorphic.app/kat", &pk).unwrap();
+    assert_eq!(vkey.signature_type(), SignatureType::Ed25519);
+    assert_eq!(vkey.encode(), HYBRID_KAT_ED25519_VKEY);
+}
+
+#[test]
+fn dual_line_checkpoint_signs_one_body_with_two_independently_verifiable_lines() {
+    // One call signs the KAT head with both lines from the ONE composite key.
+    let note_text = metamorphic_log::checkpoint::sign_checkpoint_dual(
+        "metamorphic.app/kat",
+        10,
+        "q1bnDR7DLfXk0sCC5tD4hbsBLg7p+9Gd4tT8H9wYnKE=",
+        "metamorphic.app/kat",
+        HYBRID_KAT_SK,
+    )
+    .unwrap();
+    let note = SignedNote::parse(&note_text).unwrap();
+
+    // Same body as the single-line KAT, exactly two lines, same name,
+    // different key ids.
+    assert_eq!(note.text(), HYBRID_KAT_BODY);
+    assert_eq!(note.signatures().len(), 2);
+    assert_eq!(note.signatures()[0].name(), "metamorphic.app/kat");
+    assert_eq!(note.signatures()[1].name(), "metamorphic.app/kat");
+    assert_ne!(note.signatures()[0].key_id(), note.signatures()[1].key_id());
+
+    let hybrid_vkey = VerifierKey::parse(HYBRID_KAT_VKEY).unwrap();
+    let ed25519_vkey = VerifierKey::parse(HYBRID_KAT_ED25519_VKEY).unwrap();
+
+    // A PQ verifier accepts the hybrid line (ignoring the 0x01 line); a stock
+    // Ed25519-only witness accepts the 0x01 line (ignoring the hybrid line);
+    // both together verify both lines.
+    assert_eq!(
+        note.verify(std::slice::from_ref(&hybrid_vkey))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        note.verify(std::slice::from_ref(&ed25519_vkey))
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        note.verify(&[hybrid_vkey.clone(), ed25519_vkey.clone()])
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // The checkpoint round-trips through the higher-level API either way, and
+    // a tampered body is rejected by both verifier classes.
+    let cp = Checkpoint::from_signed_note(&note_text, &[ed25519_vkey]).unwrap();
+    assert_eq!(cp.marshal(), HYBRID_KAT_BODY);
+    let tampered = note_text.replace("metamorphic.app/kat\n10\n", "metamorphic.app/kat\n11\n");
+    let tampered = SignedNote::parse(&tampered).unwrap();
+    assert!(matches!(
+        tampered.verify(&[hybrid_vkey]),
+        Err(Error::InvalidSignature { .. })
+    ));
+}
+
+// ===========================================================================
 // 2. Property tests
 // ===========================================================================
 

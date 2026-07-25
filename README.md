@@ -16,7 +16,8 @@ adds CONIKS-style index privacy via a swappable VRF.
 > substrate with `checkpoint` / `signed-note` parsing, classical Ed25519
 > witness verification, and C2SP `tlog-cosignature` v1 witness cosignatures
 > (Ed25519 `0x04` and post-quantum ML-DSA-44 `0x06`), **additive hybrid
-> post-quantum** checkpoint signing,
+> post-quantum** checkpoint signing with **dual-line** (hybrid + classical
+> Ed25519 `0x01`) checkpoint minting for stock-witness interop,
 > **CONIKS** index privacy (swappable VRF + SHA3-512 commitments + lookup/absence
 > proofs), the signed per-namespace **policy** layer with declared == observed
 > enforcement, and the **browser verification + monitor SDK** (WASM). The leaf
@@ -170,7 +171,7 @@ It does **not** solve:
 | `leaf`       | 0     | Canonical, length-prefixed leaf encoding                    |
 | `merkle`     | 1     | RFC 6962 SHA-256 tree-node hashing (fixed, witness-audited) |
 | `proof`      | 1     | Inclusion + consistency proof verification                  |
-| `checkpoint` | 2     | Signed-note / witnessed checkpoints; hybrid PQ signing      |
+| `checkpoint` | 2     | Signed-note / witnessed checkpoints; hybrid PQ + dual-line signing |
 | `vrf`        | 3     | Swappable VRF trait; ECVRF-Ed25519 (default) + ECVRF-P256   |
 | `commitment` | 3     | SHA3-512 hiding/binding index→value commitments             |
 | `coniks`     | 3     | Per-namespace directory; presence + absence (index privacy) |
