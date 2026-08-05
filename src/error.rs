@@ -153,6 +153,15 @@ pub enum Error {
     #[error("vrf proof did not verify against the namespace public key")]
     VrfProofInvalid,
 
+    /// A POPRF (RFC 9497) operation failed structurally — a key, blinded
+    /// element, or proof of the wrong byte length or a non-canonical encoding,
+    /// or a zero tweaked evaluation key (`InverseError`, a key-compromise
+    /// signal). Also returned when a cleartext identity lookup is attempted on
+    /// a POPRF-backed directory: such a directory only serves blinded
+    /// evaluations and by-index lookups, by design.
+    #[error("poprf error: {0}")]
+    Poprf(String),
+
     /// A commitment failed to open: the supplied `(value, opening)` does not
     /// reproduce the committed digest. The commitment binds an index to a value
     /// (SHA3-512, post-quantum), so a mismatch means the proof does not bind the

@@ -948,9 +948,9 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "metamorphic-crypto"
-version = "0.10.7"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04054238a950dbf5d48855ed6746e3a2f24606e55e3daefa47dfff90ce49a8e2"
+checksum = "1c36cd2330a0fe17eacaf011b8658611b503ed845caf1ec471c9fbc806b5348c"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "metamorphic-log"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "getrandom 0.2.17",
  "js-sys",

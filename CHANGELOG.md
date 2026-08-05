@@ -6,6 +6,69 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-05
+
+Adds **oblivious CONIKS index derivation** via RFC 9497 POPRF
+(OPRF(ristretto255, SHA-512), modePOPRF) — the query-time privacy upgrade over
+the classical VRF path. With the VRF, the directory must see a cleartext
+identity at query time to produce its index proof. With the POPRF, the client
+blinds its identity, the server evaluates the blinded element (learning
+nothing) and returns a DLEQ proof, and the client unblinds and verifies to the
+**same deterministic index** the server derives non-obliviously at
+tree-construction time. The prefix tree, commitments, inclusion/absence
+proofs, and log format are unchanged — only the evaluation becomes interactive
+and oblivious. The namespace is bound through the POPRF's public `info`
+metadata (the operator chooses it, e.g. `"mosskeys/directory/v1:<id>"`), not
+through the input as the VRF's `vrf_input` does.
+
+Requires `metamorphic-crypto` 0.11.0, which surfaces the RFC 9497 primitives
+(pinned to the RFC's Appendix A.1.3 vectors) that every path here uses — this
+crate adds no parallel crypto.
+
+### Breaking
+
+- `ConiksDirectory::vrf_public_key()` now returns `Option<&VrfPublicKey>`
+  (`None` on POPRF-backed directories), alongside new
+  `poprf_public_key()` / `poprf_info()` accessors and a `suite_id()`
+  discriminator (`POPRF_SUITE_ID` = `0x80` for POPRF; the RFC 9381 suite octet
+  for VRF).
+
+### Added
+
+- New `poprf` module (Layer-3e): opaque `PoprfSecretKey` / `PoprfPublicKey`
+  wrappers with `generate_keypair`, `derive_key_pair(seed, key_info)` (RFC
+  9497 §3.2.1), `derive_public_key`, `evaluate_index` (non-oblivious
+  server-side index derivation at insert time), and `blind_evaluate`
+  (server-side blinded evaluation + DLEQ proof at query time).
+  `POPRF_INDEX_LEN` (32): the index is the leading half of the 64-byte POPRF
+  output, exactly as `VrfOutput::index` truncates the VRF output. Client-side
+  blind / unblind / DLEQ-verify comes from `metamorphic-crypto` directly.
+- `ConiksDirectory::poprf(namespace, info, poprf_secret)` constructor and a
+  per-directory `IndexDerivation` (`Vrf` | `Poprf`) over a unified,
+  index-keyed leaf map.
+- `lookup_by_index` (both schemes) and `ConiksDirectory::blind_evaluate`
+  (POPRF only); cleartext `lookup()` now errors (`Error::Poprf`) on
+  POPRF-backed directories — they serve only blinded evaluations and by-index
+  lookups, by design.
+- New wire types `IndexedLookupProof` (tag `0x03`) and `IndexedAbsenceProof`
+  (tag `0x02`) with `IndexedLookupResult` (`Present` / `Absent`) and free
+  verification functions `verify_indexed_lookup` / `verify_indexed_absence`,
+  so a client that derived its index obliviously can verify the served proof
+  using only the directory root — no VRF/POPRF keys required.
+- WASM exports `coniksVerifyIndexedLookup` / `coniksVerifyIndexedAbsence`;
+  the cross-language KAT (`tests/cross_language.rs`) drives the RFC 9497
+  vectors through the WASM boundary.
+- `Error::Poprf` variant (structural POPRF failures and the
+  cleartext-lookup-on-POPRF refusal).
+
+### Post-quantum posture (unchanged, honest framing)
+
+Like the VRF path, POPRF blinding is classical (ristretto255 discrete log):
+recorded evaluation transcripts are not post-quantum private
+(harvest-now/unblind-later). It removes the *query-time* cleartext-label
+exposure today; the post-quantum-privacy track remains the #304 research
+item. Authenticity elsewhere (hybrid ML-DSA checkpoints) is unaffected.
+
 ## [0.4.0] - 2026-07-25
 
 Adds **dual-line checkpoint signing** for out-of-the-box interop with the

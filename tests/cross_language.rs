@@ -335,7 +335,7 @@ fn wasm_coniks_lookup_and_absence_route_through_verifier() {
         .unwrap();
     d.insert(b"bob@example.com", b"key-history-head-B").unwrap();
     let root = b64(&d.root());
-    let vrf_pub = b64(d.vrf_public_key().as_bytes());
+    let vrf_pub = b64(d.vrf_public_key().unwrap().as_bytes());
 
     let LookupResult::Present(present) = d.lookup(b"alice@example.com").unwrap() else {
         panic!("alice present");
@@ -604,5 +604,198 @@ fn wasm_signed_policy_sign_round_trips_through_sdk_verifier() {
             HYBRID_KAT_SK,
         )
         .is_err()
+    );
+}
+
+// --------------------------------------------------------------------------
+// 6. POPRF (RFC 9497) oblivious index derivation — byte parity
+// --------------------------------------------------------------------------
+//
+// The RFC 9497 Appendix A.1.3 vectors (POPRF mode, ristretto255-SHA512),
+// driven through the metamorphic-crypto WASM exports, plus the full oblivious
+// CONIKS serving round-trip through this crate's WASM exports: the browser
+// client computes byte-identically to the native core.
+
+use metamorphic_crypto::wasm::{
+    poprf_blind_evaluate_with_random, poprf_blind_with_scalar, poprf_derive_key_pair,
+    poprf_evaluate, poprf_finalize,
+};
+
+// Mirror of metamorphic-crypto's src/poprf.rs RFC 9497 A.1.3 KAT material.
+const POPRF_SEED: &str = "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3";
+const POPRF_KEY_INFO: &str = "74657374206b6579"; // "test key"
+const POPRF_SK_SM: &str = "145c79c108538421ac164ecbe131942136d5570b16d8bf41a24d4337da981e07";
+const POPRF_PK_SM: &str = "c647bef38497bc6ec077c22af65b696efa43bff3b4a1975a3e8e0a1c5a79d631";
+const POPRF_INFO: &str = "7465737420696e666f"; // "test info"
+const POPRF_BLIND: &str = "64d37aed22a27f5191de1c1d69fadb899d8862b58eb4220029e036ec4c1f6706";
+const POPRF_RANDOM: &str = "222a5e897cf59db8145db8d16e597e8facb80ae7d4e26d9881aa6f61d645fc0e";
+const POPRF_BLINDED_1: &str = "c8713aa89241d6989ac142f22dba30596db635c772cbf25021fdd8f3d461f715";
+const POPRF_EVALUATED_1: &str = "1a4b860d808ff19624731e67b5eff20ceb2df3c3c03b906f5693e2078450d874";
+const POPRF_PROOF_1: &str = "41ad1a291aa02c80b0915fbfbb0c0afa15a57e2970067a602ddb9e8fd6b7100d\
+                            e32e1ecff943a36f0b10e3dae6bd266cdeb8adf825d86ef27dbc6c0e30c52206";
+const POPRF_OUTPUT_1: &str = "ca688351e88afb1d841fde4401c79efebb2eb75e7998fa9737bd5a82a152406d\
+                            38bd29f680504e54fd4587eddcf2f37a2617ac2fbd2993f7bdf45442ace7d221";
+
+#[wasm_bindgen_test]
+fn wasm_poprf_rfc9497_a1_3_1_byte_parity() {
+    let sk_b64 = b64(&hex(POPRF_SK_SM));
+    let pk_b64 = b64(&hex(POPRF_PK_SM));
+    let info_b64 = b64(&hex(POPRF_INFO));
+    let input_b64 = b64(&hex("00"));
+
+    // DeriveKeyPair(seed, KeyInfo) reproduces the published keypair.
+    let kp = poprf_derive_key_pair(&b64(&hex(POPRF_SEED)), &b64(&hex(POPRF_KEY_INFO))).unwrap();
+    assert_eq!(get_str(&kp, "secretKey"), sk_b64);
+    assert_eq!(get_str(&kp, "publicKey"), pk_b64);
+
+    // Blind with the fixed scalar reproduces BlindedElement.
+    let state =
+        poprf_blind_with_scalar(&input_b64, &info_b64, &pk_b64, &b64(&hex(POPRF_BLIND))).unwrap();
+    assert_eq!(
+        get_str(&state, "blindedElement"),
+        b64(&hex(POPRF_BLINDED_1))
+    );
+    assert_eq!(get_str(&state, "blind"), b64(&hex(POPRF_BLIND)));
+
+    // BlindEvaluate with the fixed DLEQ nonce reproduces EvaluationElement +
+    // Proof byte-for-byte.
+    let evaluation = poprf_blind_evaluate_with_random(
+        &sk_b64,
+        &get_str(&state, "blindedElement"),
+        &info_b64,
+        &b64(&hex(POPRF_RANDOM)),
+    )
+    .unwrap();
+    assert_eq!(
+        get_str(&evaluation, "evaluatedElement"),
+        b64(&hex(POPRF_EVALUATED_1))
+    );
+    assert_eq!(get_str(&evaluation, "proof"), b64(&hex(POPRF_PROOF_1)));
+
+    // Finalize (verify + unblind) reproduces Output; the non-oblivious server
+    // Evaluate derives the identical bytes.
+    let output = poprf_finalize(
+        &input_b64,
+        &get_str(&state, "blind"),
+        &get_str(&evaluation, "evaluatedElement"),
+        &get_str(&state, "blindedElement"),
+        &get_str(&evaluation, "proof"),
+        &info_b64,
+        &get_str(&state, "tweakedKey"),
+    )
+    .unwrap()
+    .expect("DLEQ proof must verify");
+    assert_eq!(output, b64(&hex(POPRF_OUTPUT_1)));
+    assert_eq!(
+        poprf_evaluate(&sk_b64, &input_b64, &info_b64).unwrap(),
+        b64(&hex(POPRF_OUTPUT_1))
+    );
+}
+
+#[wasm_bindgen_test]
+fn wasm_coniks_indexed_proofs_oblivious_round_trip() {
+    // A POPRF-backed directory built from the RFC key; the whole oblivious
+    // client flow (blind -> server blind-evaluate -> finalize -> index ->
+    // by-index lookup -> WASM proof verify) runs with byte parity in-browser.
+    let info = b"mosskeys/directory/v1:acme";
+    let info_b64 = b64(info);
+    let secret = metamorphic_log::poprf::PoprfSecretKey::from_bytes(hex(POPRF_SK_SM));
+    let pk = metamorphic_log::poprf::derive_public_key(&secret).unwrap();
+    assert_eq!(pk.as_bytes(), &hex(POPRF_PK_SM)[..]);
+    let pk_b64 = b64(pk.as_bytes());
+
+    let ns = metamorphic_log::coniks::Namespace::parse("acme").unwrap();
+    let mut dir =
+        metamorphic_log::coniks::ConiksDirectory::poprf(ns.clone(), info.to_vec(), secret).unwrap();
+    dir.insert(b"alice", b"alice-value").unwrap();
+    dir.insert(b"bob", b"bob-value").unwrap();
+    let root_b64 = b64(&metamorphic_log::coniks::ConiksDirectory::root(&dir));
+    let suite_id = dir.suite_id();
+
+    // The client derives alice's index obliviously, in-WASM.
+    let state = metamorphic_crypto::wasm::poprf_blind(&b64(b"alice"), &info_b64, &pk_b64).unwrap();
+    let evaluation = metamorphic_crypto::wasm::poprf_blind_evaluate(
+        &b64(hex(POPRF_SK_SM).as_slice()),
+        &get_str(&state, "blindedElement"),
+        &info_b64,
+    )
+    .unwrap();
+    let output = metamorphic_crypto::wasm::poprf_finalize(
+        &b64(b"alice"),
+        &get_str(&state, "blind"),
+        &get_str(&evaluation, "evaluatedElement"),
+        &get_str(&state, "blindedElement"),
+        &get_str(&evaluation, "proof"),
+        &info_b64,
+        &get_str(&state, "tweakedKey"),
+    )
+    .unwrap()
+    .expect("DLEQ proof must verify");
+    let index_b64 = b64(&metamorphic_crypto::b64::decode(&output).unwrap()[..32]);
+
+    // Presence at the derived index verifies through the WASM export.
+    let result = dir.lookup_by_index(
+        &metamorphic_crypto::b64::decode(&index_b64)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    let metamorphic_log::coniks::IndexedLookupResult::Present(proof) = result else {
+        panic!("alice should be present");
+    };
+    let value = coniks_verify_indexed_lookup(
+        "acme",
+        suite_id,
+        &root_b64,
+        &index_b64,
+        &b64(&proof.to_bytes()),
+    )
+    .unwrap();
+    assert_eq!(
+        metamorphic_crypto::b64::decode(&value).unwrap(),
+        b"alice-value"
+    );
+
+    // Absence at carol's derived index verifies through the WASM export.
+    let carol_index = {
+        let state =
+            metamorphic_crypto::wasm::poprf_blind(&b64(b"carol"), &info_b64, &pk_b64).unwrap();
+        let evaluation = metamorphic_crypto::wasm::poprf_blind_evaluate(
+            &b64(hex(POPRF_SK_SM).as_slice()),
+            &get_str(&state, "blindedElement"),
+            &info_b64,
+        )
+        .unwrap();
+        let output = metamorphic_crypto::wasm::poprf_finalize(
+            &b64(b"carol"),
+            &get_str(&state, "blind"),
+            &get_str(&evaluation, "evaluatedElement"),
+            &get_str(&state, "blindedElement"),
+            &get_str(&evaluation, "proof"),
+            &info_b64,
+            &get_str(&state, "tweakedKey"),
+        )
+        .unwrap()
+        .expect("DLEQ proof must verify");
+        b64(&metamorphic_crypto::b64::decode(&output).unwrap()[..32])
+    };
+    let result = dir.lookup_by_index(
+        &metamorphic_crypto::b64::decode(&carol_index)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    let metamorphic_log::coniks::IndexedLookupResult::Absent(proof) = result else {
+        panic!("carol should be absent");
+    };
+    assert!(
+        coniks_verify_indexed_absence(
+            "acme",
+            suite_id,
+            &root_b64,
+            &carol_index,
+            &b64(&proof.to_bytes())
+        )
+        .unwrap()
     );
 }
