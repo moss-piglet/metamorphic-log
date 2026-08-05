@@ -45,7 +45,9 @@ use wasm_bindgen::prelude::*;
 
 use crate::checkpoint::{self, Checkpoint};
 use crate::commitment::{Commitment, Opening};
-use crate::coniks::{AbsenceProof, LookupProof, Namespace};
+use crate::coniks::{
+    AbsenceProof, IndexedAbsenceProof, IndexedLookupProof, LookupProof, Namespace,
+};
 use crate::directory::DirectoryBackendId;
 use crate::keytrans::{KeytransVerifier, KtSuite};
 use crate::leaf::ContextLabel;
@@ -492,6 +494,56 @@ pub fn coniks_verify_absence(
     let proof = AbsenceProof::from_bytes(&decode(proof_b64)?).map_err(to_js)?;
     crate::coniks::verify_absence(&Ecvrf, &ns, &vrf_public, &root, &identity, &proof)
         .map_err(to_js)?;
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// CONIKS index privacy: index-bound (POPRF / client-derived index) proofs
+// ---------------------------------------------------------------------------
+
+/// Verify a CONIKS **index-bound presence** proof against a directory root —
+/// the POPRF (RFC 9497) oblivious-lookup path.
+///
+/// `index_b64` is the 32-byte tree index the client derived itself
+/// (`poprfFinalize` output's leading 32 bytes); `suite_id` is the directory's
+/// index-derivation binding identifier (from the directory head); `proof_b64`
+/// is the canonical `IndexedLookupProof`. No identity or scheme key crosses
+/// the boundary. Returns the proven value as base64; throws on root mismatch.
+#[wasm_bindgen(js_name = "coniksVerifyIndexedLookup")]
+pub fn coniks_verify_indexed_lookup(
+    namespace: &str,
+    suite_id: u8,
+    root_b64: &str,
+    index_b64: &str,
+    proof_b64: &str,
+) -> Result<String, JsValue> {
+    let ns = Namespace::parse(namespace).map_err(to_js)?;
+    let root = decode_array_64(root_b64)?;
+    let index = decode_array_32(index_b64)?;
+    let proof = IndexedLookupProof::from_bytes(&decode(proof_b64)?).map_err(to_js)?;
+    let value = crate::coniks::verify_indexed_lookup(&ns, suite_id, &root, &index, &proof)
+        .map_err(to_js)?;
+    Ok(b64::encode(&value))
+}
+
+/// Verify a CONIKS **index-bound absence** proof against a directory root.
+///
+/// Same inputs as [`coniks_verify_indexed_lookup`] but `proof_b64` is a
+/// canonical `IndexedAbsenceProof`. Returns `true` if the index provably holds
+/// the empty leaf under `root`; throws otherwise.
+#[wasm_bindgen(js_name = "coniksVerifyIndexedAbsence")]
+pub fn coniks_verify_indexed_absence(
+    namespace: &str,
+    suite_id: u8,
+    root_b64: &str,
+    index_b64: &str,
+    proof_b64: &str,
+) -> Result<bool, JsValue> {
+    let ns = Namespace::parse(namespace).map_err(to_js)?;
+    let root = decode_array_64(root_b64)?;
+    let index = decode_array_32(index_b64)?;
+    let proof = IndexedAbsenceProof::from_bytes(&decode(proof_b64)?).map_err(to_js)?;
+    crate::coniks::verify_indexed_absence(&ns, suite_id, &root, &index, &proof).map_err(to_js)?;
     Ok(true)
 }
 

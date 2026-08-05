@@ -151,7 +151,7 @@ fn reference_directory_present_and_absent_roundtrip() {
     let value = verify_lookup(
         &Ecvrf,
         d.namespace(),
-        d.vrf_public_key(),
+        d.vrf_public_key().unwrap(),
         &root,
         b"alice@example.com",
         &present,
@@ -167,7 +167,7 @@ fn reference_directory_present_and_absent_roundtrip() {
     verify_absence(
         &Ecvrf,
         d.namespace(),
-        d.vrf_public_key(),
+        d.vrf_public_key().unwrap(),
         &root,
         b"carol@example.com",
         &absent,

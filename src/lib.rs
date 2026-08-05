@@ -246,6 +246,7 @@ pub mod leaf;
 pub mod merkle;
 pub mod note;
 pub mod policy;
+pub mod poprf;
 pub mod proof;
 pub mod tile;
 pub mod vrf;

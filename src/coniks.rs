@@ -6,10 +6,18 @@
 //!
 //! Three pieces combine here:
 //!
-//! 1. A swappable VRF ([`crate::vrf`]) maps an identity to a private, verifiable
-//!    256-bit tree **index**. Because the index is the VRF output, an observer
-//!    learns nothing about the identity, and the directory cannot move an
-//!    identity elsewhere without a fresh VRF proof.
+//! 1. A swappable **index-derivation** scheme maps an identity to a private,
+//!    verifiable 256-bit tree **index**. Two schemes are supported:
+//!    - a swappable VRF ([`crate::vrf`]): the server evaluates the VRF over the
+//!      cleartext identity at query time and returns a proof; or
+//!    - a POPRF ([`crate::poprf`], RFC 9497): the *client* blinds its identity,
+//!      the server evaluates the blinded element (learning nothing), and the
+//!      client unblinds + verifies to recover the same index — the query-time
+//!      cleartext-label exposure is gone.
+//!
+//!    Because the index is the scheme's output, an observer learns nothing
+//!    about the identity, and the directory cannot move an identity elsewhere
+//!    without a fresh proof.
 //! 2. A SHA3-512 **commitment** ([`crate::commitment`]) binds that index to the
 //!    identity's value (e.g. a key-history head). The commitment — the
 //!    post-quantum, binding half — is what actually sits in the tree.
@@ -19,10 +27,11 @@
 //!    leaf at an index proves *absence*.
 //!
 //! Everything is **per-namespace**: the namespace label is threaded through the
-//! VRF input and every tree/commitment hash, so proofs from one namespace never
-//! verify against another. The VRF construction is bound in via its
-//! [`suite_id`](crate::vrf::Vrf::suite_id), so a proof is tied to the exact VRF
-//! it was produced under.
+//! VRF input (VRF scheme) or the POPRF public `info` metadata (POPRF scheme),
+//! and through every tree/commitment hash, so proofs from one namespace never
+//! verify against another. The scheme is bound in via its suite identifier
+//! ([`Vrf::suite_id`] / [`crate::poprf::POPRF_SUITE_ID`]), so a proof is tied
+//! to the exact scheme it was produced under.
 //!
 //! ## Independent verification (#316)
 //!
@@ -52,6 +61,7 @@ use crate::directory::{
     SearchProof, SearchResult,
 };
 use crate::error::{Error, Result};
+use crate::poprf::{self, POPRF_SUITE_ID, PoprfPublicKey, PoprfSecretKey};
 use crate::vrf::{Vrf, VrfProof, VrfPublicKey, VrfSecretKey};
 
 /// Tree depth: a 256-bit index gives one leaf position per possible VRF output
@@ -59,8 +69,8 @@ use crate::vrf::{Vrf, VrfProof, VrfPublicKey, VrfSecretKey};
 const TREE_DEPTH: usize = 256;
 /// Length of a tree node / leaf hash, in bytes (SHA3-512).
 const NODE_LEN: usize = 64;
-/// Length of the VRF-derived index, in bytes.
-const INDEX_LEN: usize = 32;
+/// Length of the scheme-derived index, in bytes.
+pub const INDEX_LEN: usize = 32;
 
 /// A validated CONIKS namespace — the per-tenant domain separator.
 ///
@@ -529,24 +539,168 @@ pub enum LookupResult {
     Absent(AbsenceProof),
 }
 
-struct DirectoryEntry {
+const TAG_ABSENCE_INDEXED: u8 = 0x02;
+const TAG_PRESENCE_INDEXED: u8 = 0x03;
+
+/// An **index-bound presence** proof: the leaf at an already-derived tree
+/// index holds the revealed `(value, opening)`, and the authentication path
+/// recomputes the directory root. Carries no VRF proof — the index itself is
+/// the caller's evidence (derived obliviously via POPRF, or from a previously
+/// verified VRF proof), so the verification needs no scheme key at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedLookupProof {
+    value: Vec<u8>,
+    opening: Opening,
+    auth_path: AuthPath,
+}
+
+impl IndexedLookupProof {
+    /// The revealed value bound at the index. Only trustworthy once the proof
+    /// has been checked with [`verify_indexed_lookup`].
+    #[must_use]
+    pub fn value(&self) -> &[u8] {
+        &self.value
+    }
+
+    /// Canonical serialization: `0x03 || lp(value) || opening(32) || auth_path`.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = vec![TAG_PRESENCE_INDEXED];
+        push_lp(&mut out, &self.value);
+        out.extend_from_slice(self.opening.as_bytes());
+        out.extend_from_slice(&self.auth_path.to_bytes());
+        out
+    }
+
+    /// Parse a canonical index-bound presence proof.
+    ///
+    /// # Errors
+    /// Returns [`Error::MalformedConiksProof`] if the tag, length prefixes, or
+    /// trailing authentication path are inconsistent.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let Some((&tag, rest)) = bytes.split_first() else {
+            return Err(Error::MalformedConiksProof("empty proof".into()));
+        };
+        if tag != TAG_PRESENCE_INDEXED {
+            return Err(Error::MalformedConiksProof(format!(
+                "expected indexed presence tag 0x03, got {tag:#04x}"
+            )));
+        }
+        let (value, off) = read_lp(rest, 0, "value")?;
+        if rest.len() < off + COMMITMENT_OPENING_LEN {
+            return Err(Error::MalformedConiksProof("missing opening".into()));
+        }
+        let mut opening = [0u8; COMMITMENT_OPENING_LEN];
+        opening.copy_from_slice(&rest[off..off + COMMITMENT_OPENING_LEN]);
+        let (auth_path, consumed) = AuthPath::parse(&rest[off + COMMITMENT_OPENING_LEN..])?;
+        if off + COMMITMENT_OPENING_LEN + consumed != rest.len() {
+            return Err(Error::MalformedConiksProof(
+                "trailing bytes after authentication path".into(),
+            ));
+        }
+        Ok(Self {
+            value: value.to_vec(),
+            opening: Opening::from_bytes(opening),
+            auth_path,
+        })
+    }
+}
+
+/// An **index-bound absence** proof: the leaf at an already-derived tree index
+/// is the (default) empty leaf, and the authentication path to it recomputes
+/// the directory root — proving nothing is committed there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedAbsenceProof {
+    auth_path: AuthPath,
+}
+
+impl IndexedAbsenceProof {
+    /// Canonical serialization: `0x02 || auth_path`.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = vec![TAG_ABSENCE_INDEXED];
+        out.extend_from_slice(&self.auth_path.to_bytes());
+        out
+    }
+
+    /// Parse a canonical index-bound absence proof.
+    ///
+    /// # Errors
+    /// Returns [`Error::MalformedConiksProof`] if the tag or the trailing
+    /// authentication path is inconsistent.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let Some((&tag, rest)) = bytes.split_first() else {
+            return Err(Error::MalformedConiksProof("empty proof".into()));
+        };
+        if tag != TAG_ABSENCE_INDEXED {
+            return Err(Error::MalformedConiksProof(format!(
+                "expected indexed absence tag 0x02, got {tag:#04x}"
+            )));
+        }
+        let (auth_path, consumed) = AuthPath::parse(rest)?;
+        if consumed != rest.len() {
+            return Err(Error::MalformedConiksProof(
+                "trailing bytes after authentication path".into(),
+            ));
+        }
+        Ok(Self { auth_path })
+    }
+}
+
+/// The outcome of a [`ConiksDirectory::lookup_by_index`]: either an
+/// index-bound presence or absence proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexedLookupResult {
+    /// A leaf is present at the index; carries an [`IndexedLookupProof`].
+    Present(IndexedLookupProof),
+    /// The index holds the empty leaf; carries an [`IndexedAbsenceProof`].
+    Absent(IndexedAbsenceProof),
+}
+
+struct LeafEntry {
+    commitment: Commitment,
     value: Vec<u8>,
     opening: Opening,
 }
 
+/// How a directory derives the private tree index for an identity — the one
+/// axis on which a CONIKS tree is versioned.
+enum IndexDerivation {
+    /// A swappable VRF ([`crate::vrf`]): the server evaluates over the
+    /// cleartext identity (`vrf_input`) at insert and query time.
+    Vrf {
+        vrf: Box<dyn Vrf>,
+        secret: VrfSecretKey,
+        public: VrfPublicKey,
+    },
+    /// A POPRF ([`crate::poprf`], RFC 9497): the server derives indices at
+    /// insert time non-obliviously (`Evaluate`) and answers only blinded
+    /// evaluations and by-index lookups at query time, so it never sees a
+    /// cleartext lookup label. The namespace is bound through the public
+    /// `info` metadata, not the input.
+    Poprf {
+        secret: PoprfSecretKey,
+        public: PoprfPublicKey,
+        info: Vec<u8>,
+    },
+}
+
 /// A per-namespace CONIKS directory: maps identities to committed values at
-/// VRF-derived indices and produces presence/absence proofs against its root.
+/// scheme-derived indices and produces presence/absence proofs against its
+/// root.
 ///
 /// This is the prover/operator side. Relying parties verify with the free
-/// [`verify_lookup`] / [`verify_absence`] functions and never need this type.
+/// [`verify_lookup`] / [`verify_absence`] functions (VRF scheme) or
+/// [`verify_indexed_lookup`] / [`verify_indexed_absence`] (any scheme, given a
+/// client-derived index) and never need this type.
 pub struct ConiksDirectory {
     namespace: Namespace,
-    vrf: Box<dyn Vrf>,
-    vrf_secret: VrfSecretKey,
-    vrf_public: VrfPublicKey,
+    index: IndexDerivation,
     hasher: TreeHasher,
-    entries: BTreeMap<Vec<u8>, DirectoryEntry>,
-    leaves: BTreeMap<[u8; INDEX_LEN], Commitment>,
+    /// Every leaf, keyed by its scheme-derived index. Presence for both lookup
+    /// paths is answered from this one map: an identity is present iff the
+    /// index it derives to is a key here.
+    leaves: BTreeMap<[u8; INDEX_LEN], LeafEntry>,
     /// Incremental subtree-hash cache keyed by `(depth, node_prefix)`. It holds
     /// **only branch nodes** — subtree positions covering two or more leaves —
     /// which is at most `leaves - 1` entries (O(N) memory, not O(N x depth)).
@@ -566,8 +720,8 @@ impl ConiksDirectory {
         Self::with_secret_key(namespace, vrf, vrf_secret, vrf_public)
     }
 
-    /// Create an empty directory from an existing VRF secret key (e.g. a
-    /// persisted per-namespace key).
+    /// Create an empty VRF-backed directory from an existing VRF secret key
+    /// (e.g. a persisted per-namespace key).
     ///
     /// # Errors
     /// Returns [`Error::Vrf`] if the public key cannot be derived from the
@@ -592,14 +746,47 @@ impl ConiksDirectory {
         let hasher = TreeHasher::new(&namespace, vrf.suite_id());
         Self {
             namespace,
-            vrf,
-            vrf_secret,
-            vrf_public,
+            index: IndexDerivation::Vrf {
+                vrf,
+                secret: vrf_secret,
+                public: vrf_public,
+            },
             hasher,
-            entries: BTreeMap::new(),
             leaves: BTreeMap::new(),
             branch_cache: HashMap::new(),
         }
+    }
+
+    /// Create an empty POPRF-backed directory for `namespace` (RFC 9497
+    /// index-oblivious lookups).
+    ///
+    /// `info` is the public POPRF metadata binding this namespace's evaluations
+    /// (e.g. mosskeys' `"mosskeys/directory/v1:<namespace_id>"`); it is
+    /// threaded through both construction (`Evaluate`) and serving
+    /// (`BlindEvaluate`), and the client must use the identical `info` to
+    /// recover the same index. `poprf_secret` is the deployment evaluation key.
+    ///
+    /// # Errors
+    /// Returns [`Error::Poprf`] if the public key cannot be derived from the
+    /// secret key.
+    pub fn poprf(
+        namespace: Namespace,
+        info: Vec<u8>,
+        poprf_secret: PoprfSecretKey,
+    ) -> Result<Self> {
+        let public = poprf::derive_public_key(&poprf_secret)?;
+        let hasher = TreeHasher::new(&namespace, POPRF_SUITE_ID);
+        Ok(Self {
+            namespace,
+            index: IndexDerivation::Poprf {
+                secret: poprf_secret,
+                public,
+                info,
+            },
+            hasher,
+            leaves: BTreeMap::new(),
+            branch_cache: HashMap::new(),
+        })
     }
 
     /// The namespace this directory serves.
@@ -608,30 +795,79 @@ impl ConiksDirectory {
         &self.namespace
     }
 
-    /// The VRF public key relying parties use to verify proofs.
+    /// The index-derivation suite identifier bound into this directory's leaf
+    /// hashes (an RFC 9381 suite octet for a VRF directory,
+    /// [`POPRF_SUITE_ID`] for a POPRF one).
     #[must_use]
-    pub fn vrf_public_key(&self) -> &VrfPublicKey {
-        &self.vrf_public
+    pub fn suite_id(&self) -> u8 {
+        match &self.index {
+            IndexDerivation::Vrf { vrf, .. } => vrf.suite_id(),
+            IndexDerivation::Poprf { .. } => POPRF_SUITE_ID,
+        }
+    }
+
+    /// The VRF public key relying parties use to verify proofs, for a
+    /// VRF-backed directory (`None` on a POPRF one).
+    #[must_use]
+    pub fn vrf_public_key(&self) -> Option<&VrfPublicKey> {
+        match &self.index {
+            IndexDerivation::Vrf { public, .. } => Some(public),
+            IndexDerivation::Poprf { .. } => None,
+        }
+    }
+
+    /// The POPRF public key clients blind under, for a POPRF-backed directory
+    /// (`None` on a VRF one).
+    #[must_use]
+    pub fn poprf_public_key(&self) -> Option<&PoprfPublicKey> {
+        match &self.index {
+            IndexDerivation::Poprf { public, .. } => Some(public),
+            IndexDerivation::Vrf { .. } => None,
+        }
+    }
+
+    /// The public POPRF `info` metadata binding this directory's evaluations,
+    /// for a POPRF-backed directory (`None` on a VRF one).
+    #[must_use]
+    pub fn poprf_info(&self) -> Option<&[u8]> {
+        match &self.index {
+            IndexDerivation::Poprf { info, .. } => Some(info),
+            IndexDerivation::Vrf { .. } => None,
+        }
+    }
+
+    /// Derive the tree index for `identity` under this directory's scheme.
+    /// VRF: `vrf_input` namespaced input, proof-to-output; POPRF: bare identity
+    /// input, namespace bound via `info`.
+    fn derive_index(&self, identity: &[u8]) -> Result<[u8; INDEX_LEN]> {
+        match &self.index {
+            IndexDerivation::Vrf { vrf, secret, .. } => {
+                let alpha = self.namespace.vrf_input(identity);
+                let proof = vrf.prove(secret, &alpha)?;
+                Ok(vrf.proof_to_output(&proof)?.index())
+            }
+            IndexDerivation::Poprf { secret, info, .. } => {
+                poprf::evaluate_index(secret, identity, info)
+            }
+        }
     }
 
     /// Insert (or replace) `identity`'s `value`, committing to it under a fresh
-    /// random opening and placing the commitment at the identity's VRF-derived
+    /// random opening and placing the commitment at the identity's derived
     /// index.
     ///
     /// # Errors
-    /// Returns [`Error::Vrf`] if proving the identity's index fails.
+    /// Returns [`Error::Vrf`] / [`Error::Poprf`] if index derivation fails.
     pub fn insert(&mut self, identity: &[u8], value: &[u8]) -> Result<()> {
-        let alpha = self.namespace.vrf_input(identity);
-        let proof = self.vrf.prove(&self.vrf_secret, &alpha)?;
-        let index = self.vrf.proof_to_output(&proof)?.index();
+        let index = self.derive_index(identity)?;
 
         let (commitment, opening) =
             crate::commitment::commit(&self.namespace.commitment_label(), value);
 
-        self.leaves.insert(index, commitment);
-        self.entries.insert(
-            identity.to_vec(),
-            DirectoryEntry {
+        self.leaves.insert(
+            index,
+            LeafEntry {
+                commitment,
                 value: value.to_vec(),
                 opening,
             },
@@ -651,7 +887,7 @@ impl ConiksDirectory {
             // Empty subtree: the precomputed default.
             (None, _) => self.hasher.empty[depth],
             // Exactly one leaf: fold it up from the leaf level on demand.
-            (Some((index, commitment)), None) => self.singleton_subtree(depth, index, commitment),
+            (Some((index, leaf)), None) => self.singleton_subtree(depth, index, &leaf.commitment),
             // Two or more leaves: a branch node, which is always cached.
             (Some(_), Some(_)) => *self
                 .branch_cache
@@ -690,11 +926,11 @@ impl ConiksDirectory {
     /// removed. O(depth) hashes and map operations.
     fn recompute_branch_path(&mut self, index: &[u8; INDEX_LEN]) {
         let mut current = {
-            let commitment = self
+            let leaf = self
                 .leaves
                 .get(index)
                 .expect("leaf was just inserted for this index");
-            self.hasher.leaf_hash(index, commitment)
+            self.hasher.leaf_hash(index, &leaf.commitment)
         };
         for depth in (0..TREE_DEPTH).rev() {
             let sibling = self.subtree_hash(depth + 1, &sibling_prefix(index, depth));
@@ -723,40 +959,93 @@ impl ConiksDirectory {
         self.subtree_hash(0, &[0u8; INDEX_LEN])
     }
 
-    /// Look up `identity`, returning a presence or absence proof against the
-    /// current root.
-    ///
-    /// # Errors
-    /// Returns [`Error::Vrf`] if proving the identity's index fails.
-    pub fn lookup(&self, identity: &[u8]) -> Result<LookupResult> {
-        let alpha = self.namespace.vrf_input(identity);
-        let vrf_proof = self.vrf.prove(&self.vrf_secret, &alpha)?;
-        let index = self.vrf.proof_to_output(&vrf_proof)?.index();
-
+    /// Assemble the authentication path for `index` from depth 0 to
+    /// `TREE_DEPTH - 1`, recording empty-default siblings as `None` exactly as
+    /// the from-scratch `collect_path` oracle does.
+    fn auth_path(&self, index: &[u8; INDEX_LEN]) -> AuthPath {
         let mut siblings = Vec::with_capacity(TREE_DEPTH);
         for depth in 0..TREE_DEPTH {
-            let sibling = self.subtree_hash(depth + 1, &sibling_prefix(&index, depth));
-            // A sibling equal to the empty default is recorded as `None`, exactly
-            // as the from-scratch `collect_path` does, so proofs are identical.
+            let sibling = self.subtree_hash(depth + 1, &sibling_prefix(index, depth));
             siblings.push(if sibling == self.hasher.empty[depth + 1] {
                 None
             } else {
                 Some(sibling)
             });
         }
-        let auth_path = AuthPath { siblings };
+        AuthPath { siblings }
+    }
 
-        match self.entries.get(identity) {
-            Some(entry) => Ok(LookupResult::Present(LookupProof {
+    /// Look up `identity` in the clear, returning a presence or absence proof
+    /// against the current root. **VRF-backed directories only**: a POPRF
+    /// directory never sees a cleartext lookup label by design — clients blind
+    /// ([`ConiksDirectory::blind_evaluate`]) and query by derived index
+    /// ([`ConiksDirectory::lookup_by_index`]).
+    ///
+    /// # Errors
+    /// - [`Error::Poprf`] on a POPRF-backed directory.
+    /// - [`Error::Vrf`] if proving the identity's index fails.
+    pub fn lookup(&self, identity: &[u8]) -> Result<LookupResult> {
+        let IndexDerivation::Vrf { vrf, secret, .. } = &self.index else {
+            return Err(Error::Poprf(
+                "cleartext identity lookups are not supported on a POPRF-backed directory: \
+                 use blind_evaluate + lookup_by_index"
+                    .into(),
+            ));
+        };
+        let alpha = self.namespace.vrf_input(identity);
+        let vrf_proof = vrf.prove(secret, &alpha)?;
+        let index = vrf.proof_to_output(&vrf_proof)?.index();
+        let auth_path = self.auth_path(&index);
+
+        match self.leaves.get(&index) {
+            Some(leaf) => Ok(LookupResult::Present(LookupProof {
                 vrf_proof,
-                value: entry.value.clone(),
-                opening: entry.opening.clone(),
+                value: leaf.value.clone(),
+                opening: leaf.opening.clone(),
                 auth_path,
             })),
             None => Ok(LookupResult::Absent(AbsenceProof {
                 vrf_proof,
                 auth_path,
             })),
+        }
+    }
+
+    /// Look up a **derived index** directly, returning a presence or absence
+    /// proof against the current root — no identity and no cleartext label
+    /// involved. This is the POPRF serving path (the client derives the index
+    /// obliviously and verifies with [`verify_indexed_lookup`] /
+    /// [`verify_indexed_absence`]); it works on VRF-backed directories too,
+    /// for clients that derived the index from a previously verified VRF proof.
+    #[must_use]
+    pub fn lookup_by_index(&self, index: &[u8; INDEX_LEN]) -> IndexedLookupResult {
+        let auth_path = self.auth_path(index);
+        match self.leaves.get(index) {
+            Some(leaf) => IndexedLookupResult::Present(IndexedLookupProof {
+                value: leaf.value.clone(),
+                opening: leaf.opening.clone(),
+                auth_path,
+            }),
+            None => IndexedLookupResult::Absent(IndexedAbsenceProof { auth_path }),
+        }
+    }
+
+    /// The server-side oblivious evaluation (RFC 9497 `BlindEvaluate`):
+    /// evaluate a client's blinded element under this directory's POPRF key,
+    /// returning `(evaluated_element, dleq_proof)`. The directory learns
+    /// nothing about the identity behind the blinded element.
+    ///
+    /// # Errors
+    /// - [`Error::Poprf`] on a VRF-backed directory, or if the blinded element
+    ///   is structurally invalid, or the tweaked key is zero (`InverseError`).
+    pub fn blind_evaluate(&self, blinded_element: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+        match &self.index {
+            IndexDerivation::Poprf { secret, info, .. } => {
+                poprf::blind_evaluate(secret, blinded_element, info)
+            }
+            IndexDerivation::Vrf { .. } => Err(Error::Poprf(
+                "blind evaluation requires a POPRF-backed directory".into(),
+            )),
         }
     }
 }
@@ -837,6 +1126,66 @@ pub fn verify_absence(
 
     let hasher = TreeHasher::new(namespace, vrf.suite_id());
     let recomputed = hasher.recompute_root(&index, hasher.empty_leaf(), &proof.auth_path.siblings);
+
+    if &recomputed == root {
+        Ok(())
+    } else {
+        Err(Error::ConiksRootMismatch)
+    }
+}
+
+/// Independently verify an **index-bound presence** proof, returning the
+/// proven value.
+///
+/// The caller supplies the tree `index` it derived itself (obliviously via
+/// POPRF, or from a previously verified VRF proof) — no identity, scheme key,
+/// or scheme proof is needed: the revealed `(value, opening)` must reproduce
+/// the leaf commitment at `index`, and the authentication path must recompute
+/// `root`. `suite_id` is the directory's index-derivation binding identifier
+/// ([`ConiksDirectory::suite_id`]), bound into the leaf hash.
+///
+/// # Errors
+/// - [`Error::ConiksRootMismatch`] if the authentication path does not
+///   recompute `root` (a wrong value, opening, or tampered path).
+pub fn verify_indexed_lookup(
+    namespace: &Namespace,
+    suite_id: u8,
+    root: &[u8; NODE_LEN],
+    index: &[u8; INDEX_LEN],
+    proof: &IndexedLookupProof,
+) -> Result<Vec<u8>> {
+    let commitment = crate::commitment::commit_with_opening(
+        &namespace.commitment_label(),
+        &proof.value,
+        &proof.opening,
+    );
+    let hasher = TreeHasher::new(namespace, suite_id);
+    let leaf = hasher.leaf_hash(index, &commitment);
+    let recomputed = hasher.recompute_root(index, leaf, &proof.auth_path.siblings);
+
+    if &recomputed == root {
+        Ok(proof.value.clone())
+    } else {
+        Err(Error::ConiksRootMismatch)
+    }
+}
+
+/// Independently verify an **index-bound absence** proof: the authentication
+/// path to the *empty* leaf at `index` must recompute `root` — proving no
+/// value is committed there.
+///
+/// # Errors
+/// - [`Error::ConiksRootMismatch`] if the authentication path does not
+///   recompute `root`.
+pub fn verify_indexed_absence(
+    namespace: &Namespace,
+    suite_id: u8,
+    root: &[u8; NODE_LEN],
+    index: &[u8; INDEX_LEN],
+    proof: &IndexedAbsenceProof,
+) -> Result<()> {
+    let hasher = TreeHasher::new(namespace, suite_id);
+    let recomputed = hasher.recompute_root(index, hasher.empty_leaf(), &proof.auth_path.siblings);
 
     if &recomputed == root {
         Ok(())
@@ -982,7 +1331,7 @@ mod tests {
         let value = verify_lookup(
             &Ecvrf,
             d.namespace(),
-            d.vrf_public_key(),
+            d.vrf_public_key().unwrap(),
             &root,
             b"alice",
             &proof,
@@ -1003,7 +1352,7 @@ mod tests {
         verify_absence(
             &Ecvrf,
             d.namespace(),
-            d.vrf_public_key(),
+            d.vrf_public_key().unwrap(),
             &root,
             b"carol",
             &proof,
@@ -1021,7 +1370,7 @@ mod tests {
         verify_absence(
             &Ecvrf,
             d.namespace(),
-            d.vrf_public_key(),
+            d.vrf_public_key().unwrap(),
             &root,
             b"nobody",
             &proof,
@@ -1042,7 +1391,7 @@ mod tests {
             verify_lookup(
                 &Ecvrf,
                 d.namespace(),
-                d.vrf_public_key(),
+                d.vrf_public_key().unwrap(),
                 &root,
                 b"alice",
                 &proof
@@ -1072,7 +1421,7 @@ mod tests {
             verify_absence(
                 &Ecvrf,
                 d.namespace(),
-                d.vrf_public_key(),
+                d.vrf_public_key().unwrap(),
                 &root,
                 b"alice",
                 &forged
@@ -1093,7 +1442,15 @@ mod tests {
         // namespace-scoped, so the proof does not verify.
         let other = Namespace::parse("evil").unwrap();
         assert!(
-            verify_lookup(&Ecvrf, &other, d.vrf_public_key(), &root, b"alice", &proof).is_err()
+            verify_lookup(
+                &Ecvrf,
+                &other,
+                d.vrf_public_key().unwrap(),
+                &root,
+                b"alice",
+                &proof
+            )
+            .is_err()
         );
     }
 
@@ -1109,7 +1466,7 @@ mod tests {
             verify_lookup(
                 &Ecvrf,
                 d.namespace(),
-                d.vrf_public_key(),
+                d.vrf_public_key().unwrap(),
                 &bad_root,
                 b"alice",
                 &proof
@@ -1133,7 +1490,7 @@ mod tests {
             verify_lookup(
                 &Ecvrf,
                 d.namespace(),
-                d.vrf_public_key(),
+                d.vrf_public_key().unwrap(),
                 &root,
                 b"alice",
                 &reparsed
@@ -1150,7 +1507,7 @@ mod tests {
         verify_absence(
             &Ecvrf,
             d.namespace(),
-            d.vrf_public_key(),
+            d.vrf_public_key().unwrap(),
             &root,
             b"carol",
             &reparsed_absent,
@@ -1180,6 +1537,214 @@ mod tests {
         assert_eq!(Directory::backend_id(&d), CONIKS_V1);
     }
 
+    // ─── POPRF-backed directories (RFC 9497 index-oblivious serving) ─────────
+
+    use crate::poprf::PoprfSecretKey;
+
+    fn poprf_dir() -> ConiksDirectory {
+        let (secret, _public) = crate::poprf::generate_keypair();
+        ConiksDirectory::poprf(
+            Namespace::parse("acme").unwrap(),
+            b"mosskeys/directory/v1:acme".to_vec(),
+            secret,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn poprf_directory_lookup_by_index_present_and_absent() {
+        let mut d = poprf_dir();
+        d.insert(b"alice", b"alice-value").unwrap();
+        d.insert(b"bob", b"bob-value").unwrap();
+        let root = d.root();
+
+        // The client-side index derivation: the operator's public key + the
+        // public info, run through the RFC 9497 client flow.
+        let info = d.poprf_info().unwrap().to_vec();
+        let pk = d.poprf_public_key().unwrap().clone();
+        let derive = |identity: &[u8]| -> [u8; INDEX_LEN] {
+            let state = metamorphic_crypto::poprf_blind(identity, &info, pk.as_bytes()).unwrap();
+            let (evaluated, proof) = d.blind_evaluate(&state.blinded_element).unwrap();
+            let output = metamorphic_crypto::poprf_finalize(
+                identity,
+                &state.blind,
+                &evaluated,
+                &state.blinded_element,
+                &proof,
+                &info,
+                &state.tweaked_key,
+            )
+            .unwrap()
+            .expect("DLEQ proof must verify");
+            output[..INDEX_LEN].try_into().unwrap()
+        };
+
+        // Presence: the obliviously derived index lands on alice's leaf.
+        let index = derive(b"alice");
+        let IndexedLookupResult::Present(proof) = d.lookup_by_index(&index) else {
+            panic!("alice should be present");
+        };
+        let value =
+            verify_indexed_lookup(d.namespace(), d.suite_id(), &root, &index, &proof).unwrap();
+        assert_eq!(value, b"alice-value");
+
+        // Absence: carol's index holds the empty leaf.
+        let absent_index = derive(b"carol");
+        let IndexedLookupResult::Absent(proof) = d.lookup_by_index(&absent_index) else {
+            panic!("carol should be absent");
+        };
+        verify_indexed_absence(d.namespace(), d.suite_id(), &root, &absent_index, &proof).unwrap();
+    }
+
+    #[test]
+    fn poprf_server_index_matches_oblivious_client_index() {
+        // The directory's insert-time `Evaluate` index and the client's
+        // blind/unblind/verify index are the same 32 bytes — the property the
+        // whole oblivious serving path rests on.
+        let mut d = poprf_dir();
+        d.insert(b"alice", b"v").unwrap();
+
+        let server_index = d.derive_index(b"alice").unwrap();
+        let info = d.poprf_info().unwrap().to_vec();
+        let pk = d.poprf_public_key().unwrap().clone();
+        let state = metamorphic_crypto::poprf_blind(b"alice", &info, pk.as_bytes()).unwrap();
+        let (evaluated, proof) = d.blind_evaluate(&state.blinded_element).unwrap();
+        let output = metamorphic_crypto::poprf_finalize(
+            b"alice",
+            &state.blind,
+            &evaluated,
+            &state.blinded_element,
+            &proof,
+            &info,
+            &state.tweaked_key,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(&server_index[..], &output[..INDEX_LEN]);
+    }
+
+    #[test]
+    fn poprf_directory_rejects_cleartext_lookup() {
+        let mut d = poprf_dir();
+        d.insert(b"alice", b"v").unwrap();
+        assert!(matches!(d.lookup(b"alice"), Err(Error::Poprf(_))));
+    }
+
+    #[test]
+    fn vrf_directory_rejects_blind_evaluate() {
+        let d = dir();
+        assert!(matches!(d.blind_evaluate(&[0u8; 32]), Err(Error::Poprf(_))));
+    }
+
+    #[test]
+    fn poprf_and_vrf_roots_diverge_for_same_leaves() {
+        // The suite id is bound into every leaf hash, so the two schemes
+        // produce different roots over identical (identity, value) data —
+        // proofs can never be reinterpreted across schemes.
+        let mut v = dir();
+        v.insert(b"alice", b"v").unwrap();
+        let mut p = poprf_dir();
+        p.insert(b"alice", b"v").unwrap();
+        assert_ne!(v.root(), p.root());
+        assert_ne!(v.suite_id(), p.suite_id());
+        assert_eq!(p.suite_id(), crate::poprf::POPRF_SUITE_ID);
+        assert!(p.vrf_public_key().is_none());
+        assert!(v.poprf_public_key().is_none());
+    }
+
+    #[test]
+    fn indexed_proofs_round_trip_through_bytes() {
+        let mut d = poprf_dir();
+        d.insert(b"alice", b"alice-value").unwrap();
+        let index = d.derive_index(b"alice").unwrap();
+        let root = d.root();
+
+        let IndexedLookupResult::Present(present) = d.lookup_by_index(&index) else {
+            panic!("present");
+        };
+        let reparsed = IndexedLookupProof::from_bytes(&present.to_bytes()).unwrap();
+        assert_eq!(reparsed, present);
+        assert_eq!(
+            verify_indexed_lookup(d.namespace(), d.suite_id(), &root, &index, &reparsed).unwrap(),
+            b"alice-value"
+        );
+
+        let absent_index = d.derive_index(b"carol").unwrap();
+        let IndexedLookupResult::Absent(absent) = d.lookup_by_index(&absent_index) else {
+            panic!("absent");
+        };
+        let reparsed_absent = IndexedAbsenceProof::from_bytes(&absent.to_bytes()).unwrap();
+        assert_eq!(reparsed_absent, absent);
+        verify_indexed_absence(
+            d.namespace(),
+            d.suite_id(),
+            &root,
+            &absent_index,
+            &reparsed_absent,
+        )
+        .unwrap();
+
+        // Malformed / cross-tag bytes are rejected.
+        assert!(IndexedLookupProof::from_bytes(&[]).is_err());
+        assert!(IndexedLookupProof::from_bytes(&absent.to_bytes()).is_err());
+        assert!(IndexedAbsenceProof::from_bytes(&present.to_bytes()).is_err());
+    }
+
+    #[test]
+    fn indexed_lookup_rejects_wrong_index_and_root() {
+        let mut d = poprf_dir();
+        d.insert(b"alice", b"v").unwrap();
+        let index = d.derive_index(b"alice").unwrap();
+        let other_index = d.derive_index(b"mallory").unwrap();
+        let root = d.root();
+
+        let IndexedLookupResult::Present(proof) = d.lookup_by_index(&index) else {
+            panic!("present");
+        };
+        // A valid proof checked at the wrong index must fail root recomputation.
+        assert_eq!(
+            verify_indexed_lookup(d.namespace(), d.suite_id(), &root, &other_index, &proof),
+            Err(Error::ConiksRootMismatch)
+        );
+        // And against the wrong root.
+        let bad_root = [0u8; NODE_LEN];
+        assert_eq!(
+            verify_indexed_lookup(d.namespace(), d.suite_id(), &bad_root, &index, &proof),
+            Err(Error::ConiksRootMismatch)
+        );
+        // A VRF suite id (different leaf-hash binding) must also fail.
+        assert_eq!(
+            verify_indexed_lookup(d.namespace(), 0x03, &root, &index, &proof),
+            Err(Error::ConiksRootMismatch)
+        );
+    }
+
+    #[test]
+    fn poprf_directory_persists_from_secret_key() {
+        // Construction from a persisted secret yields the same indices (the
+        // property an operator relies on across restarts).
+        let (secret, _public) = crate::poprf::generate_keypair();
+        let secret = PoprfSecretKey::from_bytes(secret.into_bytes());
+        let mut d1 = ConiksDirectory::poprf(
+            Namespace::parse("acme").unwrap(),
+            b"info".to_vec(),
+            PoprfSecretKey::from_bytes(secret.as_bytes().to_vec()),
+        )
+        .unwrap();
+        d1.insert(b"alice", b"v").unwrap();
+        let d2 =
+            ConiksDirectory::poprf(Namespace::parse("acme").unwrap(), b"info".to_vec(), secret)
+                .unwrap();
+        assert_eq!(
+            d1.derive_index(b"alice").unwrap(),
+            d2.derive_index(b"alice").unwrap()
+        );
+        assert_eq!(
+            d1.poprf_public_key().unwrap().as_bytes(),
+            d2.poprf_public_key().unwrap().as_bytes()
+        );
+    }
+
     #[test]
     fn directory_is_object_safe() {
         // Compiles + runs only if `Directory` is object-safe — the property a
@@ -1197,7 +1762,7 @@ mod tests {
         let verifier: Box<dyn DirectoryVerifier> = Box::new(ConiksVerifier::new(
             concrete.namespace().clone(),
             Box::new(Ecvrf),
-            concrete.vrf_public_key().clone(),
+            concrete.vrf_public_key().unwrap().clone(),
         ));
         let dir_obj: Box<dyn Directory> = Box::new(concrete);
         let root = dir_obj.root();
@@ -1256,16 +1821,22 @@ mod tests {
             d.insert(id, format!("value-{n}").as_bytes()).unwrap();
 
             // Root matches the from-scratch oracle over the current leaf set.
-            let all: Vec<_> = d.leaves.iter().collect();
+            let all: Vec<_> = d
+                .leaves
+                .iter()
+                .map(|(index, leaf)| (index, &leaf.commitment))
+                .collect();
             let oracle_root = d.hasher.subtree(0, &all);
             assert_eq!(d.root(), oracle_root, "root mismatch after {n} inserts");
         }
 
-        let all: Vec<_> = d.leaves.iter().collect();
+        let all: Vec<_> = d
+            .leaves
+            .iter()
+            .map(|(index, leaf)| (index, &leaf.commitment))
+            .collect();
         let oracle_path = |identity: &[u8]| {
-            let alpha = d.namespace.vrf_input(identity);
-            let proof = d.vrf.prove(&d.vrf_secret, &alpha).unwrap();
-            let index = d.vrf.proof_to_output(&proof).unwrap().index();
+            let index = d.derive_index(identity).unwrap();
             let mut siblings = Vec::new();
             d.hasher.collect_path(0, &index, &all, &mut siblings);
             AuthPath { siblings }.to_bytes()
@@ -1297,7 +1868,11 @@ mod tests {
         let root_after = d.root();
         assert_ne!(root_before, root_after);
 
-        let all: Vec<_> = d.leaves.iter().collect();
+        let all: Vec<_> = d
+            .leaves
+            .iter()
+            .map(|(index, leaf)| (index, &leaf.commitment))
+            .collect();
         assert_eq!(root_after, d.hasher.subtree(0, &all));
 
         let LookupResult::Present(proof) = d.lookup(b"alice").unwrap() else {
@@ -1307,7 +1882,7 @@ mod tests {
             verify_lookup(
                 &Ecvrf,
                 d.namespace(),
-                d.vrf_public_key(),
+                d.vrf_public_key().unwrap(),
                 &root_after,
                 b"alice",
                 &proof,
@@ -1346,7 +1921,7 @@ mod tests {
                     unreachable!();
                 };
                 let value = verify_lookup(
-                    &Ecvrf, d.namespace(), d.vrf_public_key(), &root, &key, &proof,
+                    &Ecvrf, d.namespace(), d.vrf_public_key().unwrap(), &root, &key, &proof,
                 ).unwrap();
                 prop_assert_eq!(value, format!("v{id}").into_bytes());
             }
@@ -1358,7 +1933,7 @@ mod tests {
                 unreachable!();
             };
             verify_absence(
-                &Ecvrf, d.namespace(), d.vrf_public_key(), &root, &key, &proof,
+                &Ecvrf, d.namespace(), d.vrf_public_key().unwrap(), &root, &key, &proof,
             ).unwrap();
         }
     }
